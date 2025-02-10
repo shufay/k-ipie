@@ -378,13 +378,14 @@ def kpt_symmchol_ecoul_kernel_uhf(rchola, rcholb, rcholbara, rcholbarb, Ghalfa, 
     multiply = numpy.multiply
     nwalkers = Ghalfa.shape[2]
 
-    # shape of rchola: (nq, nk, nocc, naux, nbsf) (q, k, gamma, i, p)
+    # shape of rchola: (nq, nk, nocc, naux, nbsf) (q, k, i, gamma, p)
     # shape of Ghalf: (nk, nk, nw, nocc, nbsf)
     unique_nq = len(Sset) + len(Qplus)
     nbsf = rchola.shape[4]
-    nocc = rchola.shape[2]
     naux = rchola.shape[3]
     nk = rchola.shape[1]
+    nocca = rchola.shape[2]
+    noccb = rcholb.shape[2]
     rchola = rchola.transpose(0, 1, 3, 2, 4).copy()
     rcholb = rcholb.transpose(0, 1, 3, 2, 4).copy()
     rcholbara = rcholbara.transpose(0, 1, 3, 2, 4).copy()
@@ -398,15 +399,15 @@ def kpt_symmchol_ecoul_kernel_uhf(rchola, rcholb, rcholbara, rcholbarb, Ghalfa, 
         Xbarq = Xbar[iq]
         for ik in range(nk):
             ik_pq = kpq_mat[iq_real, ik]
-            La = rchola[iq, ik].reshape(naux,nocc*nbsf)
-            Lb = rcholb[iq, ik].reshape(naux,nocc*nbsf)
-            Lbara = rcholbara[iq, ik].reshape(naux,nocc*nbsf)
-            Lbarb = rcholbarb[iq, ik].reshape(naux,nocc*nbsf)
+            La = rchola[iq, ik].reshape(naux,nocca*nbsf)
+            Lb = rcholb[iq, ik].reshape(naux,noccb*nbsf)
+            Lbara = rcholbara[iq, ik].reshape(naux,nocca*nbsf)
+            Lbarb = rcholbarb[iq, ik].reshape(naux,noccb*nbsf)
             for iw in range(nwalkers):
-                Ghalfa_k_kpq = Ghalfa[ik, ik_pq, iw].reshape(nocc*nbsf)
-                GhalfTa_k_kpq = GhalfaT[ik, ik_pq, iw].reshape(nocc*nbsf)
-                Ghalfb_k_kpq = Ghalfb[ik, ik_pq, iw].reshape(nocc*nbsf)
-                GhalfTb_k_kpq = GhalfbT[ik, ik_pq, iw].reshape(nocc*nbsf)
+                Ghalfa_k_kpq = Ghalfa[ik, ik_pq, iw].reshape(nocca*nbsf)
+                GhalfTa_k_kpq = GhalfaT[ik, ik_pq, iw].reshape(nocca*nbsf)
+                Ghalfb_k_kpq = Ghalfb[ik, ik_pq, iw].reshape(noccb*nbsf)
+                GhalfTb_k_kpq = GhalfbT[ik, ik_pq, iw].reshape(noccb*nbsf)
                 Xq[iw] += La @ Ghalfa_k_kpq + Lb @ Ghalfb_k_kpq 
                 Xbarq[iw] += Lbara @ GhalfTa_k_kpq + Lbarb @ GhalfTb_k_kpq
 
@@ -416,15 +417,15 @@ def kpt_symmchol_ecoul_kernel_uhf(rchola, rcholb, rcholbara, rcholbarb, Ghalfa, 
         Xbarq = Xbar[iq]
         for ik in range(nk):
             ik_pq = kpq_mat[iq_real, ik]
-            La = rchola[iq, ik].reshape(naux,nocc*nbsf)
-            Lb = rcholb[iq, ik].reshape(naux,nocc*nbsf)
-            Lbara = rcholbara[iq, ik].reshape(naux,nocc*nbsf)
-            Lbarb = rcholbarb[iq, ik].reshape(naux,nocc*nbsf)
+            La = rchola[iq, ik].reshape(naux,nocca*nbsf)
+            Lb = rcholb[iq, ik].reshape(naux,noccb*nbsf)
+            Lbara = rcholbara[iq, ik].reshape(naux,nocca*nbsf)
+            Lbarb = rcholbarb[iq, ik].reshape(naux,noccb*nbsf)
             for iw in range(nwalkers):
-                Ghalfa_k_kpq = Ghalfa[ik, ik_pq, iw].reshape(nocc*nbsf)
-                GhalfTa_k_kpq = GhalfaT[ik, ik_pq, iw].reshape(nocc*nbsf)
-                Ghalfb_k_kpq = Ghalfb[ik, ik_pq, iw].reshape(nocc*nbsf)
-                GhalfTb_k_kpq = GhalfbT[ik, ik_pq, iw].reshape(nocc*nbsf)
+                Ghalfa_k_kpq = Ghalfa[ik, ik_pq, iw].reshape(nocca*nbsf)
+                GhalfTa_k_kpq = GhalfaT[ik, ik_pq, iw].reshape(nocca*nbsf)
+                Ghalfb_k_kpq = Ghalfb[ik, ik_pq, iw].reshape(noccb*nbsf)
+                GhalfTb_k_kpq = GhalfbT[ik, ik_pq, iw].reshape(noccb*nbsf)
                 Xq[iw] += sqrt(2) * (La @ Ghalfa_k_kpq + Lb @ Ghalfb_k_kpq)
                 Xbarq[iw] += sqrt(2) * (Lbara @ GhalfTa_k_kpq + Lbarb @ GhalfTb_k_kpq)
 
