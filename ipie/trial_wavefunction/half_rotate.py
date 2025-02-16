@@ -3,7 +3,7 @@ from typing import Tuple
 import numpy as np
 
 from ipie.hamiltonians.generic import Generic, GenericComplexChol, GenericRealChol
-from ipie.hamiltonians.kpt_hamiltonian import KptComplexChol, KptComplexCholSymm
+from ipie.hamiltonians.kpt_hamiltonian import KptComplexChol, KptComplexCholSymm, KptISDF
 from ipie.hamiltonians.kpt_chunked import KptComplexCholChunked
 from ipie.hamiltonians.generic_chunked import GenericRealCholChunked
 from ipie.trial_wavefunction.wavefunction_base import TrialWavefunctionBase
@@ -398,12 +398,19 @@ def half_rotate_chunked(
 
             rchola_chunk = [np.zeros((ndets, unique_nk, nk, na, hamiltonian.nchol_chunk, M), dtype=integral_type)]
             rcholbara_chunk = [np.zeros((ndets, unique_nk, nk, M, hamiltonian.nchol_chunk, na), dtype=integral_type)]
-            rcholb_chunk = [np.zeros((ndets, unique_nk, nk, nb, hamiltonian.nchol_chunk, M), dtype=integral_type)]
-            rcholbarb_chunk = [np.zeros((ndets, unique_nk, nk, M, hamiltonian.nchol_chunk, nb), dtype=integral_type)]
+            if nb > 0:
+                rcholb_chunk = [np.zeros((ndets, unique_nk, nk, nb, hamiltonian.nchol_chunk, M), dtype=integral_type)]
+                rcholbarb_chunk = [np.zeros((ndets, unique_nk, nk, M, hamiltonian.nchol_chunk, nb), dtype=integral_type)]
+            else:
+                rcholb_chunk = [None]
+                rcholbarb_chunk = [None]
 
 
             rH1a = np.einsum("Jkpi,kpq->Jkiq", orbsa.conj(), hamiltonian.H1[0], optimize=True)
-            rH1b = np.einsum("Jkpi,kpq->Jkiq", orbsb.conj(), hamiltonian.H1[1], optimize=True)
+            if nb > 0:
+                rH1b = np.einsum("Jkpi,kpq->Jkiq", orbsb.conj(), hamiltonian.H1[1], optimize=True)
+            else:
+                rH1b = None
 
             if verbose:
                 print("# Half-Rotating Cholesky for determinant.")
@@ -441,14 +448,16 @@ def half_rotate_chunked(
                     chol_chunk,
                     optimize=True,
                 )
-                rdn = np.einsum(
-                    "Jkpi,Xkpqr->JqkiXr",
-                    orbsb.conj(),
-                    chol_chunk,
-                    optimize=True,
-                )
+                if nb > 0:
+                    rdn = np.einsum(
+                        "Jkpi,Xkpqr->JqkiXr",
+                        orbsb.conj(),
+                        chol_chunk,
+                        optimize=True,
+                    )
                 rchola_chunk[0][:] = rup[:]
-                rcholb_chunk[0][:] = rdn[:]
+                if nb > 0:
+                    rcholb_chunk[0][:] = rdn[:]
                 for iq in range(hamiltonian.unique_nk):
                     iq_real = hamiltonian.unique_k[iq]
                     ikpq = hamiltonian.ikpq_mat[iq_real]
@@ -458,13 +467,15 @@ def half_rotate_chunked(
                         chol_chunk[:, :, :, iq, :].conj(),
                         optimize=True,
                     )
-                    rbardn = np.einsum(
-                        "Jkri, Xkpr -> JkpXi",
-                        orbsb[:, ikpq, :, :].conj(),
-                        chol_chunk[:, :, :, iq, :].conj(),
-                    )
+                    if nb > 0:
+                        rbardn = np.einsum(
+                            "Jkri, Xkpr -> JkpXi",
+                            orbsb[:, ikpq, :, :].conj(),
+                            chol_chunk[:, :, :, iq, :].conj(),
+                        )
                     rcholbara_chunk[0][:, iq, :, :, :, :] = rbarup[:]
-                    rcholbarb_chunk[0][:, iq, :, :, :, :] = rbardn[:]                    
+                    if nb > 0:
+                        rcholbarb_chunk[0][:, iq, :, :, :, :] = rbardn[:]                    
             if comm is not None:
                 comm.barrier()
 
@@ -478,3 +489,40 @@ def half_rotate_chunked(
 
     # storing intermediates for correlation energy
     return (rH1a, rH1b), (rchola, rcholb)
+
+
+def half_rotate_isdf(trial: TrialWavefunctionBase,
+    hamiltonian: Generic,
+    comm,
+    orbsa: np.ndarray,
+    orbsb: np.ndarray,
+    ndets: int = 1,
+    verbose: bool = False,
+) -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]:
+    assert len(orbsa.shape) == 4 #(ndets, nk, nbsf, nocc)
+    assert len(orbsb.shape) == 4
+    assert orbsa.shape[0] == ndets
+    assert orbsb.shape[0] == ndets
+    M = hamiltonian.nbasis
+    nk = orbsa.shape[1]
+    na = orbsa.shape[-1]
+    nb = orbsb.shape[-1]
+    assert isinstance(hamiltonian, KptISDF)
+
+    ctype = hamiltonian.cholM.dtype
+    ptype = orbsa.dtype
+    integral_type = ctype if ctype.itemsize > ptype.itemsize else ptype
+
+    rH1a = get_shared_array(comm, (ndets, nk, na, M), integral_type)
+    rH1b = get_shared_array(comm, (ndets, nk, nb, M), integral_type)
+
+    rH1a[:] = np.einsum("Jkpi,kpq->Jkiq", orbsa.conj(), hamiltonian.H1[0], optimize=True)
+    rH1b[:] = np.einsum("Jkpi,kpq->Jkiq", orbsb.conj(), hamiltonian.H1[1], optimize=True)
+
+    # now rotate the cgtos
+    cgto = hamiltonian.cgto # [k, P, p]
+    rot_cgtoa = np.einsum('Jkpi, kPp -> JkPi', orbsa, cgto, optimize=True)
+    rot_cgtob = np.einsum('Jkpi, kPp -> JkPi', orbsb, cgto, optimize=True)
+
+    return (rH1a, rH1b), (rot_cgtoa, rot_cgtob)
+

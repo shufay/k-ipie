@@ -23,6 +23,8 @@ from ipie.utils.mpi import make_splits_displacements
 from ipie.utils.kpt_conv import find_gamma_pt, find_self_inverse_set, find_Qplus
 from ipie.hamiltonians.kpt_hamiltonian import construct_kpq, construct_kmq, construct_mq
 
+from numba import jit
+
 
 try:
     from mpi4py import MPI
@@ -30,23 +32,40 @@ except ImportError:
     MPI = None
 
 def construct_h1e_mod_symm(chol, h1e, ikmq_mat, Sset, Qplus, h1e_mod, handler):
-    nk, nbasis = h1e.shape[1], h1e.shape[2]
+    v0 = calc_v0(chol, ikmq_mat, Sset, Qplus)
+    v0 = handler.scomm.allreduce(v0, op=MPI.SUM)
+    h1e_mod[0, :, :, :] = h1e[0, :, :, :] - v0
+    h1e_mod[1, :, :, :] = h1e[1, :, :, :] - v0
+
+@jit(nopython=True, fastmath=True)
+def calc_v0(chol, ikmq_mat, Sset, Qplus):
+    nk, nbasis = chol.shape[1], chol.shape[2]
     nchol = chol.shape[0]
     unique_nk = len(Sset) + len(Qplus)
-    chol = chol.reshape((nchol, nk, nbasis, unique_nk, nbasis))
+    # chol = chol.reshape((nchol, nk, nbasis, unique_nk, nbasis))
     v0 = numpy.zeros((nk, nbasis, nbasis), dtype=numpy.complex128)
     for iq in range(len(Sset)):
         for ik in range(nk):
-            v0[ik] += .5 * numpy.einsum('gpr, gqr -> pq', chol[:, ik, :, iq, :], chol[:, ik, :, iq, :].conj())
+            chol_ik = chol[:, ik, :, iq, :]
+            chol_pgr = chol_ik.transpose(1, 0, 2).copy() # pgr
+            chol_p_gr = chol_pgr.reshape(nbasis, nchol * nbasis)
+            chol_gr_p = chol_p_gr.T.copy()
+            v0[ik] += .5 * numpy.dot(chol_p_gr, chol_gr_p.conj())
     
     for iq in range(len(Sset), len(Sset) + len(Qplus)):
         for ik in range(nk):
             iq_real = Qplus[iq - len(Sset)]
             ikmq = ikmq_mat[iq_real, ik]
-            v0[ik] += .5 * numpy.einsum('gpr, gqr -> pq', chol[:, ik, :, iq, :], chol[:, ik, :, iq, :].conj()) + .5 * numpy.einsum('grp, grq -> pq', chol[:, ikmq, :, iq, :].conj(), chol[:, ikmq, :, iq, :])
-    v0 = handler.scomm.allreduce(v0, op=MPI.SUM)
-    h1e_mod[0, :, :, :] = h1e[0, :, :, :] - v0
-    h1e_mod[1, :, :, :] = h1e[1, :, :, :] - v0
+            chol_ik = chol[:, ik, :, iq, :]
+            chol_pgr = chol_ik.transpose(1, 0, 2).copy() # pgr
+            chol_p_gr = chol_pgr.reshape(nbasis, nchol * nbasis)
+            chol_gr_p = chol_p_gr.T.copy()
+            chol_ikmq = chol[:, ikmq, :, iq, :].copy() # grp
+            chol_gr_p_mq = chol_ikmq.reshape(nchol * nbasis, nbasis)
+            chol_p_gr_mq = chol_gr_p_mq.T.copy()
+            v0[ik] += .5 * numpy.dot(chol_p_gr, chol_gr_p.conj()) + .5 * numpy.dot(chol_p_gr_mq.conj(), chol_gr_p_mq)
+    return v0
+
 
 class KptComplexCholChunked(GenericBase):
     """Class for ab-initio Hamiltonian with 4-fold complex symmetric integrals & k point symmetry.
