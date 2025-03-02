@@ -3,7 +3,6 @@ import h5py
 import numpy as np
 import os
 
-
 def split_cholesky(ham_filename: str, nmembers: int, verbose=True):
     """
     This function calculates the splits and displacements needed to distribute the
@@ -37,7 +36,7 @@ def split_cholesky(ham_filename: str, nmembers: int, verbose=True):
     if verbose:
         print("# Splitting complete.")
 
-def split_cholesky_kpt(ham_filename: str, nmembers: int, verbose=True):
+def split_cholesky_kpt(ham_filename: str, nmembers: int, ham_filepath: str='', delete=False, verbose=True):
     """
     This function calculates the splits and displacements needed to distribute the
     Cholesky vectors among the members and  splits the Cholesky decomposed Hamiltonian
@@ -55,22 +54,27 @@ def split_cholesky_kpt(ham_filename: str, nmembers: int, verbose=True):
         # for huge chol file, should read in slices at one time instead of this
         dataset = np.array(source_file["chol"][:])
         num_chol = dataset.shape[0]
+
         # delete the original dataset
-        del source_file["chol"]
-        with h5py.File(ham_filename + "_temp", "w") as temp_file:
-            # copy the other fields
-            for key in source_file.keys():
-                source_file.copy(key, temp_file)
+        if delete:
+            del source_file["chol"]
+            with h5py.File(ham_filename + "_temp", "w") as temp_file:
+                # copy the other fields
+                for key in source_file.keys():
+                    source_file.copy(key, temp_file)
+
     # remove the original file
-    os.remove(ham_filename)
-    os.rename(ham_filename + "_temp", ham_filename)
+    if delete:
+        os.remove(ham_filename)
+        os.rename(ham_filename + "_temp", ham_filename)
+
     split_sizes, displacements = make_splits_displacements(num_chol, nmembers)
 
     for i, (size, displacement) in enumerate(zip(split_sizes, displacements)):
         # Prepare row indices for slicing
         start = displacement
         end = displacement + size
-        with h5py.File(f"chol_{i}.h5", "w") as target_file:
+        with h5py.File(f"{ham_filepath}chol_{i}.h5", "w") as target_file:
             target_file.create_dataset("chol", data=dataset[start:end])
         if verbose:
             print(f"# Split {i}: Size {size}, Displacement {displacement}")

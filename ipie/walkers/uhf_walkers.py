@@ -41,11 +41,13 @@ class UHFWalkers(BaseWalkers):
         nbasis: int,
         nwalkers: int,
         mpi_handler,
+        noccs = None,
         verbose: bool = False,
     ):
         assert len(initial_walker.shape) == 2
         self.nup = nup
         self.ndown = ndown
+        self.noccs = noccs
         self.nbasis = nbasis
         self.mpi_handler = mpi_handler
 
@@ -108,17 +110,37 @@ class UHFWalkers(BaseWalkers):
         """
         if config.get_option("use_gpu"):
             return self.reortho_batched()
+        nup = self.nup
         ndown = self.ndown
+        
+        def remove_empty_kpts(phi, nelec, noccs):
+            nk = noccs.shape[-1]
+            nbsf = phi.shape[0] // nk
+            _phi = phi.reshape((self.nwalkers, nk, nbsf, nk, nelec))
+            _phi = _phi[..., noccs>0]
+            return _phi.reshape((self.nwalkers, nk*nbsf, -1))
+
+        def pad_empty_kpts(phi, nelec, noccs):
+            nk = noccs.shape[-1]
+            nbsf = phi.shape[0] // nk
+            _phi = phi.reshape((self.nwalkers, nk, nbsf, nk, -1))
+            return _phi[:, noccs>0, :, noccs>0]
+
+        if self.noccs is not None:
+            noccs = self.noccs
+            phia = remove_empty_kpts(self.phia, nup, noccs[0])
+            if ndown > 0: phib = remove_empty_kpts(self.phib, ndown, noccs[1])
+
         detR = []
         for iw in range(self.nwalkers):
-            (self.phia[iw], Rup) = qr(self.phia[iw], mode=qr_mode)
+            (phia[iw], Rup) = qr(phia[iw], mode=qr_mode)
             # TODO: FDM This isn't really necessary, the absolute value of the
             # weight is used for population control so this shouldn't matter.
             # I think this is a legacy thing.
             # Wanted detR factors to remain positive, dump the sign in orbitals.
             Rup_diag = xp.diag(Rup)
             signs_up = xp.sign(Rup_diag)
-            self.phia[iw] = xp.dot(self.phia[iw], xp.diag(signs_up))
+            phia[iw] = xp.dot(phia[iw], xp.diag(signs_up))
 
             # include overlap factor
             # det(R) = \prod_ii R_ii
@@ -127,10 +149,10 @@ class UHFWalkers(BaseWalkers):
             log_det = xp.sum(xp.log(xp.abs(Rup_diag)))
 
             if ndown > 0:
-                (self.phib[iw], Rdn) = qr(self.phib[iw], mode=qr_mode)
+                (phib[iw], Rdn) = qr(phib[iw], mode=qr_mode)
                 Rdn_diag = xp.diag(Rdn)
                 signs_dn = xp.sign(Rdn_diag)
-                self.phib[iw] = xp.dot(self.phib[iw], xp.diag(signs_dn))
+                phib[iw] = xp.dot(phib[iw], xp.diag(signs_dn))
                 log_det += sum(xp.log(abs(Rdn_diag)))
 
             detR += [xp.exp(log_det - self.detR_shift[iw])]
@@ -138,6 +160,8 @@ class UHFWalkers(BaseWalkers):
             self.detR[iw] = detR[iw]
             self.ovlp[iw] = self.ovlp[iw] / detR[iw]
 
+        self.phia = pad_empty_kpts(phia) 
+        if ndown > 0: self.phib = pad_empty_kpts(phib)
         synchronize()
         return detR
 

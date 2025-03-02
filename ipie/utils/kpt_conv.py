@@ -94,7 +94,6 @@ def find_inverted_index_batched(kpts, tol=1e-6):
     idxlis = np.array(idxlis, dtype=np.int64)
     return idxlis
 
-
 def find_gamma_pt(kpt):
     """
     Find the gamma point index

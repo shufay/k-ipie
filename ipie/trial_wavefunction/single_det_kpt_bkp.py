@@ -206,17 +206,14 @@ def _kpt_chol_exx_kernel(rchol, Ghalf, kpq_mat, mq_vec):
 
 # class for UHF trial
 class KptSingleDet(TrialWavefunctionBase):
-    def __init__(self, wavefunction, nkpts, noccs, num_basis, handler=MPIHandler(), verbose=False):
+    def __init__(self, wavefunction, nkpts, num_elec, num_basis, handler=MPIHandler(), verbose=False):
         assert isinstance(wavefunction, numpy.ndarray)
         assert len(wavefunction.shape) == 3 # nkpts, nbasis, nocc
-        assert len(noccs.shape) == 2 # nspin, nkpts
-        num_elec = (numpy.amax(noccs[0]), numpy.amax(noccs[1]))
         super().__init__(wavefunction, num_elec, num_basis, verbose=verbose)
         if verbose:
             print("# Parsing input options for trial_wavefunction.MultiSlater.")
         self.psi = wavefunction
         self.num_elec = num_elec
-        self.noccs = noccs
         self.nk = nkpts
         self._num_dets = 1
         self._max_num_dets = 1
@@ -227,7 +224,7 @@ class KptSingleDet(TrialWavefunctionBase):
 
         self.psi0a = self.psi[:, :, : self.nalpha]
         self.psi0b = self.psi[:, :, self.nalpha :]
-        self.G, self.Ghalf = gabk_spin(self.psi, self.psi, self.noccs)
+        self.G, self.Ghalf = gabk_spin(self.psi, self.psi, self.nalpha, self.nbeta)
         self.handler = handler
 
         self.psi0a = numpy.ascontiguousarray(self.psi0a)

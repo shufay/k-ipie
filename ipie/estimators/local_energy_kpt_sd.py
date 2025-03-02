@@ -388,50 +388,85 @@ def kpt_symmchol_ecoul_kernel_uhf(rchola, rcholb, rcholbara, rcholbarb, Ghalfa, 
     nbsf = rchola.shape[4]
     naux = rchola.shape[3]
     nk = rchola.shape[1]
-    nocca = rchola.shape[2]
-    noccb = rcholb.shape[2]
-    rchola = rchola.transpose(0, 1, 3, 2, 4).copy()
-    rcholb = rcholb.transpose(0, 1, 3, 2, 4).copy()
-    rcholbara = rcholbara.transpose(0, 1, 3, 2, 4).copy()
-    rcholbarb = rcholbarb.transpose(0, 1, 3, 2, 4).copy()
-    ecoul = zeros(nwalkers, dtype=numpy.complex128)
-    X = zeros((unique_nq, nwalkers, naux), dtype=numpy.complex128)
-    Xbar = zeros((unique_nq, nwalkers, naux), dtype=numpy.complex128)
-    for iq in range(len(Sset)):
-        iq_real = Sset[iq]
-        Xq = X[iq]
-        Xbarq = Xbar[iq]
-        for ik in range(nk):
-            ik_pq = kpq_mat[iq_real, ik]
-            La = rchola[iq, ik].reshape(naux,nocca*nbsf)
-            Lb = rcholb[iq, ik].reshape(naux,noccb*nbsf)
-            Lbara = rcholbara[iq, ik].reshape(naux,nocca*nbsf)
-            Lbarb = rcholbarb[iq, ik].reshape(naux,noccb*nbsf)
-            for iw in range(nwalkers):
-                Ghalfa_k_kpq = Ghalfa[ik, ik_pq, iw].reshape(nocca*nbsf)
-                GhalfTa_k_kpq = GhalfaT[ik, ik_pq, iw].reshape(nocca*nbsf)
-                Ghalfb_k_kpq = Ghalfb[ik, ik_pq, iw].reshape(noccb*nbsf)
-                GhalfTb_k_kpq = GhalfbT[ik, ik_pq, iw].reshape(noccb*nbsf)
-                Xq[iw] += La @ Ghalfa_k_kpq + Lb @ Ghalfb_k_kpq 
-                Xbarq[iw] += Lbara @ GhalfTa_k_kpq + Lbarb @ GhalfTb_k_kpq
+    if Ghalfb is not None:
+        nocca = rchola.shape[2]
+        noccb = rcholb.shape[2]
+        rchola = rchola.transpose(0, 1, 3, 2, 4).copy()
+        rcholb = rcholb.transpose(0, 1, 3, 2, 4).copy()
+        rcholbara = rcholbara.transpose(0, 1, 3, 2, 4).copy()
+        rcholbarb = rcholbarb.transpose(0, 1, 3, 2, 4).copy()
+        ecoul = zeros(nwalkers, dtype=numpy.complex128)
+        X = zeros((unique_nq, nwalkers, naux), dtype=numpy.complex128)
+        Xbar = zeros((unique_nq, nwalkers, naux), dtype=numpy.complex128)
+        for iq in range(len(Sset)):
+            iq_real = Sset[iq]
+            Xq = X[iq]
+            Xbarq = Xbar[iq]
+            for ik in range(nk):
+                ik_pq = kpq_mat[iq_real, ik]
+                La = rchola[iq, ik].reshape(naux,nocca*nbsf)
+                Lb = rcholb[iq, ik].reshape(naux,noccb*nbsf)
+                Lbara = rcholbara[iq, ik].reshape(naux,nocca*nbsf)
+                Lbarb = rcholbarb[iq, ik].reshape(naux,noccb*nbsf)
+                for iw in range(nwalkers):
+                    Ghalfa_k_kpq = Ghalfa[ik, ik_pq, iw].reshape(nocca*nbsf)
+                    GhalfTa_k_kpq = GhalfaT[ik, ik_pq, iw].reshape(nocca*nbsf)
+                    Ghalfb_k_kpq = Ghalfb[ik, ik_pq, iw].reshape(noccb*nbsf)
+                    GhalfTb_k_kpq = GhalfbT[ik, ik_pq, iw].reshape(noccb*nbsf)
+                    Xq[iw] += La @ Ghalfa_k_kpq + Lb @ Ghalfb_k_kpq 
+                    Xbarq[iw] += Lbara @ GhalfTa_k_kpq + Lbarb @ GhalfTb_k_kpq
 
-    for iq in range(len(Sset), len(Sset) + len(Qplus)):
-        iq_real = Qplus[iq - len(Sset)]
-        Xq = X[iq]
-        Xbarq = Xbar[iq]
-        for ik in range(nk):
-            ik_pq = kpq_mat[iq_real, ik]
-            La = rchola[iq, ik].reshape(naux,nocca*nbsf)
-            Lb = rcholb[iq, ik].reshape(naux,noccb*nbsf)
-            Lbara = rcholbara[iq, ik].reshape(naux,nocca*nbsf)
-            Lbarb = rcholbarb[iq, ik].reshape(naux,noccb*nbsf)
-            for iw in range(nwalkers):
-                Ghalfa_k_kpq = Ghalfa[ik, ik_pq, iw].reshape(nocca*nbsf)
-                GhalfTa_k_kpq = GhalfaT[ik, ik_pq, iw].reshape(nocca*nbsf)
-                Ghalfb_k_kpq = Ghalfb[ik, ik_pq, iw].reshape(noccb*nbsf)
-                GhalfTb_k_kpq = GhalfbT[ik, ik_pq, iw].reshape(noccb*nbsf)
-                Xq[iw] += sqrt(2) * (La @ Ghalfa_k_kpq + Lb @ Ghalfb_k_kpq)
-                Xbarq[iw] += sqrt(2) * (Lbara @ GhalfTa_k_kpq + Lbarb @ GhalfTb_k_kpq)
+        for iq in range(len(Sset), len(Sset) + len(Qplus)):
+            iq_real = Qplus[iq - len(Sset)]
+            Xq = X[iq]
+            Xbarq = Xbar[iq]
+            for ik in range(nk):
+                ik_pq = kpq_mat[iq_real, ik]
+                La = rchola[iq, ik].reshape(naux,nocca*nbsf)
+                Lb = rcholb[iq, ik].reshape(naux,noccb*nbsf)
+                Lbara = rcholbara[iq, ik].reshape(naux,nocca*nbsf)
+                Lbarb = rcholbarb[iq, ik].reshape(naux,noccb*nbsf)
+                for iw in range(nwalkers):
+                    Ghalfa_k_kpq = Ghalfa[ik, ik_pq, iw].reshape(nocca*nbsf)
+                    GhalfTa_k_kpq = GhalfaT[ik, ik_pq, iw].reshape(nocca*nbsf)
+                    Ghalfb_k_kpq = Ghalfb[ik, ik_pq, iw].reshape(noccb*nbsf)
+                    GhalfTb_k_kpq = GhalfbT[ik, ik_pq, iw].reshape(noccb*nbsf)
+                    Xq[iw] += sqrt(2) * (La @ Ghalfa_k_kpq + Lb @ Ghalfb_k_kpq)
+                    Xbarq[iw] += sqrt(2) * (Lbara @ GhalfTa_k_kpq + Lbarb @ GhalfTb_k_kpq)
+    else:
+        nocca = rchola.shape[2]
+        rchola = rchola.transpose(0, 1, 3, 2, 4).copy()
+        rcholbara = rcholbara.transpose(0, 1, 3, 2, 4).copy()
+        ecoul = zeros(nwalkers, dtype=numpy.complex128)
+        X = zeros((unique_nq, nwalkers, naux), dtype=numpy.complex128)
+        Xbar = zeros((unique_nq, nwalkers, naux), dtype=numpy.complex128)
+        for iq in range(len(Sset)):
+            iq_real = Sset[iq]
+            Xq = X[iq]
+            Xbarq = Xbar[iq]
+            for ik in range(nk):
+                ik_pq = kpq_mat[iq_real, ik]
+                La = rchola[iq, ik].reshape(naux,nocca*nbsf)
+                Lbara = rcholbara[iq, ik].reshape(naux,nocca*nbsf)
+                for iw in range(nwalkers):
+                    Ghalfa_k_kpq = Ghalfa[ik, ik_pq, iw].reshape(nocca*nbsf)
+                    GhalfTa_k_kpq = GhalfaT[ik, ik_pq, iw].reshape(nocca*nbsf)
+                    Xq[iw] += La @ Ghalfa_k_kpq
+                    Xbarq[iw] += Lbara @ GhalfTa_k_kpq
+
+        for iq in range(len(Sset), len(Sset) + len(Qplus)):
+            iq_real = Qplus[iq - len(Sset)]
+            Xq = X[iq]
+            Xbarq = Xbar[iq]
+            for ik in range(nk):
+                ik_pq = kpq_mat[iq_real, ik]
+                La = rchola[iq, ik].reshape(naux,nocca*nbsf)
+                Lbara = rcholbara[iq, ik].reshape(naux,nocca*nbsf)
+                for iw in range(nwalkers):
+                    Ghalfa_k_kpq = Ghalfa[ik, ik_pq, iw].reshape(nocca*nbsf)
+                    GhalfTa_k_kpq = GhalfaT[ik, ik_pq, iw].reshape(nocca*nbsf)
+                    Xq[iw] += sqrt(2) * La @ Ghalfa_k_kpq
+                    Xbarq[iw] += sqrt(2) * Lbara @ GhalfTa_k_kpq
 
     X = X.transpose(1, 0, 2).copy()
     Xbar = Xbar.transpose(1, 0, 2).copy()
@@ -634,44 +669,81 @@ def local_energy_kpt_single_det_uhf(
     nalpha = trial.nalpha
     nbeta = trial.nbeta
     nbasis = hamiltonian.nbasis
+    if nbeta > 0:
+        ghalfa = walkers.Ghalfa.reshape(nwalkers, nk, nalpha, nk, nbasis)
+        ghalfb = walkers.Ghalfb.reshape(nwalkers, nk, nbeta, nk, nbasis)
+        ghalfaT = walkers.Ghalfa.transpose(0, 2, 1).reshape(nwalkers, nk, nbasis, nk, nalpha)
+        ghalfbT = walkers.Ghalfb.transpose(0, 2, 1).reshape(nwalkers, nk, nbasis, nk, nbeta)
 
-    ghalfa = walkers.Ghalfa.reshape(nwalkers, nk, nalpha, nk, nbasis)
-    ghalfb = walkers.Ghalfb.reshape(nwalkers, nk, nbeta, nk, nbasis)
-    ghalfaT = walkers.Ghalfa.transpose(0, 2, 1).reshape(nwalkers, nk, nbasis, nk, nalpha)
-    ghalfbT = walkers.Ghalfb.transpose(0, 2, 1).reshape(nwalkers, nk, nbasis, nk, nbeta)
+        diagGhalfa = numpy.zeros((nwalkers, nk, nalpha, nbasis), dtype=numpy.complex128)
+        diagGhalfb = numpy.zeros((nwalkers, nk, nbeta, nbasis), dtype=numpy.complex128)
+        for ik in range(nk):
+            diagGhalfa[:, ik, :, :] = ghalfa[:, ik, :, ik, :]
+            diagGhalfb[:, ik, :, :] = ghalfb[:, ik, :, ik, :]
+        e1b = numpy.einsum('wkip, kip -> w', diagGhalfa, trial._rH1a) # Ghalfa.dot(trial._rH1a.ravel())
+        e1b += numpy.einsum('wkip, kip -> w', diagGhalfb, trial._rH1b)
+        e1b /= nk
+        e1b += hamiltonian.ecore
 
-    diagGhalfa = numpy.zeros((nwalkers, nk, nalpha, nbasis), dtype=numpy.complex128)
-    diagGhalfb = numpy.zeros((nwalkers, nk, nbeta, nbasis), dtype=numpy.complex128)
-    for ik in range(nk):
-        diagGhalfa[:, ik, :, :] = ghalfa[:, ik, :, ik, :]
-        diagGhalfb[:, ik, :, :] = ghalfb[:, ik, :, ik, :]
-    e1b = numpy.einsum('wkip, kip -> w', diagGhalfa, trial._rH1a) # Ghalfa.dot(trial._rH1a.ravel())
-    e1b += numpy.einsum('wkip, kip -> w', diagGhalfb, trial._rH1b)
-    e1b /= nk
-    e1b += hamiltonian.ecore
+        ghalfa = ghalfa.transpose(1, 3, 0, 2, 4).copy() # nk, nk, nw, nalpha, nbasis
+        ghalfb = ghalfb.transpose(1, 3, 0, 2, 4).copy() # nk, nk, nw, nbeta, nbasis
+        ghalfaTcoul = ghalfaT.transpose(1, 3, 0, 2, 4).copy() # nk, nk, nw, nbasis, nalpha
+        ghalfbTcoul = ghalfbT.transpose(1, 3, 0, 2, 4).copy() # nk, nk, nw, nbasis, nbeta
+        ghalfaTx = ghalfaT.transpose(1, 3, 2, 4, 0).copy() # nk, nk, nbasis, nalpha, nw
+        ghalfbTx = ghalfbT.transpose(1, 3, 2, 4, 0).copy() # nk, nk, nbasis, nbeta, nw
 
-    ghalfa = ghalfa.transpose(1, 3, 0, 2, 4).copy() # nk, nk, nw, nalpha, nbasis
-    ghalfb = ghalfb.transpose(1, 3, 0, 2, 4).copy() # nk, nk, nw, nbeta, nbasis
-    ghalfaTcoul = ghalfaT.transpose(1, 3, 0, 2, 4).copy() # nk, nk, nw, nbasis, nalpha
-    ghalfbTcoul = ghalfbT.transpose(1, 3, 0, 2, 4).copy() # nk, nk, nw, nbasis, nbeta
-    ghalfaTx = ghalfaT.transpose(1, 3, 2, 4, 0).copy() # nk, nk, nbasis, nalpha, nw
-    ghalfbTx = ghalfbT.transpose(1, 3, 2, 4, 0).copy() # nk, nk, nbasis, nbeta, nw
+        ecoul = kpt_symmchol_ecoul_kernel_uhf(
+            trial._rchola, trial._rcholb, trial._rcholbara, trial._rcholbarb, ghalfa, ghalfb, ghalfaTcoul, ghalfbTcoul, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus
+        )
 
-    ecoul = kpt_symmchol_ecoul_kernel_uhf(
-        trial._rchola, trial._rcholb, trial._rcholbara, trial._rcholbarb, ghalfa, ghalfb, ghalfaTcoul, ghalfbTcoul, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus
-    )
+        exxa = kpt_symmchol_exx_kernel(
+                trial._rchola, trial._rcholbara, ghalfa, ghalfaTx, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus) 
+        exxb = kpt_symmchol_exx_kernel(
+                trial._rcholb, trial._rcholbarb, ghalfb, ghalfbTx, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus)
 
-    exxa = kpt_symmchol_exx_kernel(trial._rchola, trial._rcholbara, ghalfa, ghalfaTx, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus) 
-    exxb = kpt_symmchol_exx_kernel(trial._rcholb, trial._rcholbarb, ghalfb, ghalfbTx, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus)
+        e2b = ecoul + exxa + exxb
 
+        energy = xp.zeros((nwalkers, 3), dtype=numpy.complex128)
+        energy[:, 0] = e1b + e2b
+        energy[:, 1] = e1b
+        energy[:, 2] = e2b
 
-    e2b = ecoul + exxa + exxb
+    else:
+        ghalfa = walkers.Ghalfa.reshape(nwalkers, nk, nalpha, nk, nbasis)
+        ghalfaT = walkers.Ghalfa.transpose(0, 2, 1).reshape(nwalkers, nk, nbasis, nk, nalpha)
 
-    energy = xp.zeros((nwalkers, 3), dtype=numpy.complex128)
-    energy[:, 0] = e1b + e2b
-    energy[:, 1] = e1b
-    energy[:, 2] = e2b
+        diagGhalfa = numpy.zeros((nwalkers, nk, nalpha, nbasis), dtype=numpy.complex128)
+        for ik in range(nk):
+            diagGhalfa[:, ik, :, :] = ghalfa[:, ik, :, ik, :]
+        e1b = numpy.einsum('wkip, kip -> w', diagGhalfa, trial._rH1a) # Ghalfa.dot(trial._rH1a.ravel())
+        e1b /= nk
+        e1b += hamiltonian.ecore
+        
+        rchola = trial._rchola
+        ghalfa = ghalfa.transpose(1, 3, 0, 2, 4).copy() # nk, nk, nw, nalpha, nbasis
+        ghalfaTcoul = ghalfaT.transpose(1, 3, 0, 2, 4).copy() # nk, nk, nw, nbasis, nalpha
+        ghalfaTx = ghalfaT.transpose(1, 3, 2, 4, 0).copy() # nk, nk, nbasis, nalpha, nw
+        ghalfb = None
+        ghalfbTcoul = None
+        ghalfbTx = None
 
+        ecoul = kpt_symmchol_ecoul_kernel_uhf(
+            trial._rchola, trial._rcholb, trial._rcholbara, trial._rcholbarb, ghalfa, ghalfb, ghalfaTcoul, ghalfbTcoul, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus
+        )
+
+        exxa = kpt_symmchol_exx_kernel(trial._rchola, trial._rcholbara, ghalfa, ghalfaTx, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus) 
+
+        e2b = ecoul + exxa
+
+        energy = xp.zeros((nwalkers, 3), dtype=numpy.complex128)
+        energy[:, 0] = e1b + e2b
+        energy[:, 1] = e1b
+        energy[:, 2] = e2b
+
+        #print(f'e1 = {e1b[0]}')
+        #print(f'ecoul = {ecoul[0]}')
+        #print(f'exx = {exxa[0]}')
+        #print(f'e2 = {e2b[0]}')
     return energy
 
 

@@ -61,6 +61,8 @@ def construct_one_body_propagator(
     expH1 = xp.array(
         [scipy.linalg.expm(-0.5 * dt * full_h1_mat[0]), scipy.linalg.expm(-0.5 * dt * full_h1_mat[1])]
     )
+    tmp = expH1.reshape((2, hamiltonian.nk, hamiltonian.nbasis, hamiltonian.nk, hamiltonian.nbasis))
+    expH1 = xp.einsum('skpkr->skpr', tmp)
     return expH1
 
 @plum.dispatch
@@ -348,13 +350,17 @@ class PhaselessKptBase(ContinuousBase):
 
     def propagate_walkers_one_body(self, walkers, hamiltonian):
         start_time = time.time()
-        phia_reshaped = walkers.phia.reshape(walkers.nwalkers, hamiltonian.nk, hamiltonian.nbasis, -1)
+        phia_reshaped = xp.ascontiguousarray(
+                walkers.phia.reshape(walkers.nwalkers, hamiltonian.nk, hamiltonian.nbasis, -1))
         phia = propagate_one_body_kpt(phia_reshaped, self.expH1[0])
-        walkers.phia = phia.reshape(walkers.nwalkers, hamiltonian.nk * hamiltonian.nbasis, -1)
+        walkers.phia = xp.ascontiguousarray(
+                phia.reshape(walkers.nwalkers, hamiltonian.nk * hamiltonian.nbasis, -1))
         if walkers.ndown > 0 and not walkers.rhf:
-            phib_reshaped = walkers.phib.reshape(walkers.nwalkers, hamiltonian.nk, hamiltonian.nbasis, -1)
+            phib_reshaped = xp.ascontiguousaray(
+                    walkers.phib.reshape(walkers.nwalkers, hamiltonian.nk, hamiltonian.nbasis, -1))
             phib = propagate_one_body_kpt(phib_reshaped, self.expH1[1])
-            walkers.phib = phib.reshape(walkers.nwalkers, hamiltonian.nk * hamiltonian.nbasis, -1)
+            walkers.phib = xp.ascontiguousarray(
+                    phib.reshape(walkers.nwalkers, hamiltonian.nk * hamiltonian.nbasis, -1))
         synchronize()
         self.timer.tgemm += time.time() - start_time
 

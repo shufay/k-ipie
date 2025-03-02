@@ -4,7 +4,7 @@ import pytest
 
 from ipie.estimators.energy import EnergyEstimator
 from ipie.estimators.handler import EstimatorHandler
-from ipie.utils.testing import gen_random_test_instances_kpt
+from ipie.utils.testing import gen_random_test_instances_kpt_chunked
 
 # @pytest.mark.unit
 def test_energy_estimator():
@@ -13,7 +13,7 @@ def test_energy_estimator():
     naux = 30
     nk = 8
     nwalker = 10
-    system, ham, walker_batch, trial = gen_random_test_instances_kpt(nk, nmo, nocc, naux, nwalker)
+    system, ham, walker_batch, trial = gen_random_test_instances_kpt_chunked(nk, nmo, nocc, naux, nwalker)
     estim = EnergyEstimator(system=system, ham=ham, trial=trial)
     estim.compute_estimator(system, walker_batch, ham, trial)
     assert len(estim.names) == 5
@@ -40,7 +40,7 @@ def test_estimator_handler():
         nocc = 8
         naux = 30
         nwalker = 10
-        system, ham, walker_batch, trial = gen_random_test_instances_kpt(nk, nmo, nocc, naux, nwalker)
+        system, ham, walker_batch, trial = gen_random_test_instances_kpt_chunked(nk, nmo, nocc, naux, nwalker)
         estim = EnergyEstimator(system=system, ham=ham, trial=trial, filename=tmp1.name)
         estim.print_to_stdout = False
         from ipie.config import MPI

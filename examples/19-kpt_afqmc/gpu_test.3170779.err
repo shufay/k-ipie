@@ -1,0 +1,20 @@
+Traceback (most recent call last):
+  File "/n/holylabs/LABS/joonholee_lab/Users/shufay/k-ipie/examples/19-kpt_afqmc/run_afqmc_gpu.py", line 52, in <module>
+    hcore = fa["hcore"][()]
+  File "h5py/_objects.pyx", line 54, in h5py._objects.with_phil.wrapper
+  File "h5py/_objects.pyx", line 55, in h5py._objects.with_phil.wrapper
+  File "/n/home10/shufay/.local/lib/python3.9/site-packages/h5py/_hl/dataset.py", line 803, in __getitem__
+    new_dtype = self.dtype
+  File "h5py/_objects.pyx", line 54, in h5py._objects.with_phil.wrapper
+  File "h5py/_objects.pyx", line 55, in h5py._objects.with_phil.wrapper
+  File "/n/home10/shufay/.local/lib/python3.9/site-packages/h5py/_hl/dataset.py", line 563, in dtype
+    return self.id.dtype
+  File "h5py/h5d.pyx", line 180, in h5py.h5d.DatasetID.dtype.__get__
+  File "h5py/h5d.pyx", line 183, in h5py.h5d.DatasetID.dtype.__get__
+  File "h5py/h5t.pyx", line 445, in h5py.h5t.TypeID.dtype.__get__
+  File "h5py/h5t.pyx", line 446, in h5py.h5t.TypeID.dtype.__get__
+  File "h5py/h5t.pyx", line 1223, in h5py.h5t.TypeCompoundID.py_dtype
+  File "h5py/h5t.pyx", line 1087, in h5py.h5t.TypeFloatID.py_dtype
+ValueError: Insufficient precision in available types to represent (63, 52, 11, 0, 52)
+srun: error: holygpu8a29104: task 0: Exited with exit code 1
+srun: Terminating StepId=3170779.0

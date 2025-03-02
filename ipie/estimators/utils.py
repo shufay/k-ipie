@@ -144,19 +144,40 @@ def gab_spin(A, B, na, nb):
 def gabk_mod(A, B):
     pass
 
-def gabk_spin(A, B, na, nb):
+#def gabk_spin(A, B, na, nb):
+#    assert A.shape[0] == B.shape[0]
+#    nk = A.shape[0]
+#    nbasis = A.shape[1]
+#    GA = numpy.zeros((nk, nbasis, nbasis), dtype=A.dtype)
+#    GB = numpy.zeros((nk, nbasis, nbasis), dtype=A.dtype)
+#    GAH = numpy.zeros((nk, na, nbasis), dtype=A.dtype)
+#    GBH = numpy.zeros((nk, nb, nbasis), dtype=A.dtype)
+#    for ik in range(nk):
+#        GA[ik], GAH[ik] = gab_mod(A[ik, :, :na], B[ik, :, :na])
+#    if nb > 0:
+#        for ik in range(nk):
+#            GB[ik], GBH[ik] = gab_mod(A[ik, :, na:], B[ik, :, na:])
+#    return numpy.array([GA, GB]), [GAH, GBH]
+
+def gabk_spin(A, B, noccs):
     assert A.shape[0] == B.shape[0]
     nk = A.shape[0]
     nbasis = A.shape[1]
+    na = numpy.amax(noccs[0]) 
+    nb = numpy.amax(noccs[1]) 
     GA = numpy.zeros((nk, nbasis, nbasis), dtype=A.dtype)
     GB = numpy.zeros((nk, nbasis, nbasis), dtype=A.dtype)
     GAH = numpy.zeros((nk, na, nbasis), dtype=A.dtype)
     GBH = numpy.zeros((nk, nb, nbasis), dtype=A.dtype)
     for ik in range(nk):
-        GA[ik], GAH[ik] = gab_mod(A[ik, :, :na], B[ik, :, :na])
+        nocca_ik = noccs[0, ik]
+        if nocca_ik == 0: continue
+        GA[ik], GAH[ik] = gab_mod(A[ik, :, :nocca_ik], B[ik, :, :nocca_ik])
     if nb > 0:
         for ik in range(nk):
-            GB[ik], GBH[ik] = gab_mod(A[ik, :, na:], B[ik, :, na:])
+            nocca_ik, noccb_ik = noccs[:, ik]
+            if noccb_ik == 0: continue
+            GB[ik], GBH[ik] = gab_mod(A[ik, :, nocca_ik:], B[ik, :, nocca_ik:])
     return numpy.array([GA, GB]), [GAH, GBH]
 
 
