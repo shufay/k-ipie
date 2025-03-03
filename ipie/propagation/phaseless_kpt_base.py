@@ -348,11 +348,13 @@ class PhaselessKptBase(ContinuousBase):
 
     def propagate_walkers_one_body(self, walkers, hamiltonian):
         start_time = time.time()
-        phia_reshaped = walkers.phia.reshape(walkers.nwalkers, hamiltonian.nk, hamiltonian.nbasis, -1)
+        phia_reshaped = xp.ascontiguousarray(
+                walkers.phia.reshape(walkers.nwalkers, hamiltonian.nk, hamiltonian.nbasis, -1))
         phia = propagate_one_body_kpt(phia_reshaped, self.expH1[0])
         walkers.phia = phia.reshape(walkers.nwalkers, hamiltonian.nk * hamiltonian.nbasis, -1)
         if walkers.ndown > 0 and not walkers.rhf:
-            phib_reshaped = walkers.phib.reshape(walkers.nwalkers, hamiltonian.nk, hamiltonian.nbasis, -1)
+            phib_reshaped = xp.ascontiguousarray(
+                    walkers.phib.reshape(walkers.nwalkers, hamiltonian.nk, hamiltonian.nbasis, -1))
             phib = propagate_one_body_kpt(phib_reshaped, self.expH1[1])
             walkers.phib = phib.reshape(walkers.nwalkers, hamiltonian.nk * hamiltonian.nbasis, -1)
         synchronize()

@@ -89,9 +89,9 @@ def greens_function_kpt_single_det_batch(walker_batch, trial, build_full=False):
     ndown = trial.nbeta
     nbsf = trial.nbasis
     nk = trial.nk
-    phia = walker_batch.phia.reshape(walker_batch.nwalkers, nk, nbsf, nk, nup)
+    phia = xp.ascontiguousarray(walker_batch.phia.reshape(walker_batch.nwalkers, nk, nbsf, nk, nup))
     if ndown > 0:
-        phib = walker_batch.phib.reshape(walker_batch.nwalkers, nk, nbsf, nk, ndown)
+        phib = xp.ascontiguousarray(walker_batch.phib.reshape(walker_batch.nwalkers, nk, nbsf, nk, ndown))
     else:
         phib = None
 
