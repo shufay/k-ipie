@@ -86,20 +86,25 @@ def calc_overlap_single_det_kpt(walkers:"UHFWalkers", trial: "KptSingleDet"):
     ndown = trial.nbeta
     nk = trial.nk
     nbsf = trial.nbasis
+    noccs = walkers.noccs
 
     phia = walkers.phia.reshape(nwalkers, nk, nbsf, nk, nup)
     if ndown > 0 and not walkers.rhf:
         phib = walkers.phib.reshape(nwalkers, nk, nbsf, nk, ndown)
     
     ovlpa = xp.einsum("wlpki, lpj->wkilj", phia, trial.psi0a.conj(), optimize=True)
-
-    ovlpa_reshape = ovlpa.reshape((nwalkers, nk * nup, nk * nup))
+    ovlpa = ovlpa[:, noccs[0]>0]
+    ovlpa = ovlpa[:, :, :, noccs[0]>0]
+    nk_occ = xp.sum(noccs[0]>0)
+    ovlpa_reshape = ovlpa.reshape((nwalkers, nk_occ * nup, nk_occ * nup))
     sign_a, log_ovlp_a = xp.linalg.slogdet(ovlpa_reshape)
 
     if ndown > 0 and not walkers.rhf:
         ovlpb = xp.einsum("wlpki, lpj->wkilj", phib, trial.psi0b.conj(), optimize=True)
-
-        ovlpb_reshape = ovlpb.reshape((nwalkers, nk * ndown, nk * ndown))
+        ovlpb = ovlpb[:, noccs[1]>0]
+        ovlpb = ovlpb[:, :, :, noccs[1]>0]
+        nk_occ = xp.sum(noccs[1]>0)
+        ovlpb_reshape = ovlpb.reshape((nwalkers, nk_occ * ndown, nk_occ * ndown))
         sign_b, log_ovlp_b = xp.linalg.slogdet(ovlpb_reshape)
         ot = sign_a * sign_b * xp.exp(log_ovlp_a + log_ovlp_b - walkers.log_shift)
     elif ndown > 0 and walkers.rhf:

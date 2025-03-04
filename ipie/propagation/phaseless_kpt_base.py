@@ -356,7 +356,7 @@ class PhaselessKptBase(ContinuousBase):
         walkers.phia = xp.ascontiguousarray(
                 phia.reshape(walkers.nwalkers, hamiltonian.nk * hamiltonian.nbasis, -1))
         if walkers.ndown > 0 and not walkers.rhf:
-            phib_reshaped = xp.ascontiguousaray(
+            phib_reshaped = xp.ascontiguousarray(
                     walkers.phib.reshape(walkers.nwalkers, hamiltonian.nk, hamiltonian.nbasis, -1))
             phib = propagate_one_body_kpt(phib_reshaped, self.expH1[1])
             walkers.phib = xp.ascontiguousarray(

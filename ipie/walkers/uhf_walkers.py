@@ -98,6 +98,51 @@ class UHFWalkers(BaseWalkers):
     def build(self, trial):
         self.ovlp = trial.calc_greens_function(self)
 
+    # TODO: Hack for when we have variable occupations on k-points.
+    def remove_empty_kpts(self, phi, nelec, noccs):
+        if phi is None: 
+            return None
+        
+        if phi.ndim < 3:
+            nk = noccs.shape[-1]
+            nbsf = phi.shape[0] // nk
+            nelec_per_k = nelec // nk
+            _phi = phi.reshape((nk, nbsf, nk, nelec_per_k))
+            _phi = _phi[:, :, noccs>0]
+            return _phi.reshape((nk*nbsf, -1))
+
+        nwalkers = phi.shape[0]
+        nk = noccs.shape[-1]
+        nbsf = phi.shape[1] // nk
+        nelec_per_k = nelec // nk
+        _phi = phi.reshape((nwalkers, nk, nbsf, nk, nelec_per_k))
+        _phi = _phi[:, :, :, noccs>0]
+        return _phi.reshape((nwalkers, nk*nbsf, -1))
+
+    def pad_empty_kpts(self, phi, nelec, noccs):
+        if phi is None: 
+            return None
+        
+        if phi.ndim < 3:
+            nk = noccs.shape[-1]
+            nk_occ = xp.sum(noccs)
+            nbsf = phi.shape[0] // nk
+            nelec_per_k = nelec // nk
+            _phi = phi.reshape((nk, nbsf, nk_occ, -1))
+            phi = xp.zeros((nk, nbsf, nk, nelec_per_k), dtype=_phi.dtype)
+            phi[:, :, noccs>0] = _phi
+            return phi.reshape((nk*nbsf, -1))
+
+        nwalkers = phi.shape[0]
+        nk = noccs.shape[-1]
+        nk_occ = xp.sum(noccs)
+        nbsf = phi.shape[1] // nk
+        nelec_per_k = nelec // nk
+        _phi = phi.reshape((nwalkers, nk, nbsf, nk_occ, -1))
+        phi = xp.zeros((nwalkers, nk, nbsf, nk, nelec_per_k), dtype=_phi.dtype)
+        phi[:, :, :, noccs>0] = _phi
+        return phi.reshape((nwalkers, nk*nbsf, -1))
+
     # This function casts relevant member variables into cupy arrays
     def cast_to_cupy(self, verbose=False):
         cast_to_device(self, verbose)
@@ -112,24 +157,13 @@ class UHFWalkers(BaseWalkers):
             return self.reortho_batched()
         nup = self.nup
         ndown = self.ndown
+        noccs = self.noccs
+        phia = self.phia
+        phib = self.phib
         
-        def remove_empty_kpts(phi, nelec, noccs):
-            nk = noccs.shape[-1]
-            nbsf = phi.shape[0] // nk
-            _phi = phi.reshape((self.nwalkers, nk, nbsf, nk, nelec))
-            _phi = _phi[..., noccs>0]
-            return _phi.reshape((self.nwalkers, nk*nbsf, -1))
-
-        def pad_empty_kpts(phi, nelec, noccs):
-            nk = noccs.shape[-1]
-            nbsf = phi.shape[0] // nk
-            _phi = phi.reshape((self.nwalkers, nk, nbsf, nk, -1))
-            return _phi[:, noccs>0, :, noccs>0]
-
-        if self.noccs is not None:
-            noccs = self.noccs
-            phia = remove_empty_kpts(self.phia, nup, noccs[0])
-            if ndown > 0: phib = remove_empty_kpts(self.phib, ndown, noccs[1])
+        if noccs is not None:
+            phia = self.remove_empty_kpts(self.phia, nup, noccs[0])
+            phib = self.remove_empty_kpts(self.phib, ndown, noccs[1])
 
         detR = []
         for iw in range(self.nwalkers):
@@ -160,8 +194,14 @@ class UHFWalkers(BaseWalkers):
             self.detR[iw] = detR[iw]
             self.ovlp[iw] = self.ovlp[iw] / detR[iw]
 
-        self.phia = pad_empty_kpts(phia) 
-        if ndown > 0: self.phib = pad_empty_kpts(phib)
+        if noccs is not None:
+            self.phia = self.pad_empty_kpts(phia, nup, noccs[0]) 
+            self.phib = self.pad_empty_kpts(phib, ndown, noccs[1])
+
+        else:
+            self.phia = phia
+            self.phib = phib
+
         synchronize()
         return detR
 
@@ -172,14 +212,33 @@ class UHFWalkers(BaseWalkers):
         ----------
         """
         assert config.get_option("use_gpu")
-        (self.phia, Rup) = qr(self.phia, mode=qr_mode)
+        nup = self.nup
+        ndown = self.ndown
+        noccs = self.noccs
+        phia = self.phia
+        phib = self.phib
+
+        if noccs is not None:
+            phia = self.remove_empty_kpts(self.phia, nup, noccs[0])
+            phib = self.remove_empty_kpts(self.phib, ndown, noccs[1])
+
+        (phia, Rup) = qr(phia, mode=qr_mode)
         Rup_diag = xp.einsum("wii->wi", Rup)
         log_det = xp.einsum("wi->w", xp.log(abs(Rup_diag)))
 
         if self.ndown > 0:
-            (self.phib, Rdn) = qr(self.phib, mode=qr_mode)
+            (phib, Rdn) = qr(phib, mode=qr_mode)
             Rdn_diag = xp.einsum("wii->wi", Rdn)
             log_det += xp.einsum("wi->w", xp.log(abs(Rdn_diag)))
+
+        if noccs is not None:
+            self.phia = self.pad_empty_kpts(phia, nup, noccs[0]) 
+            self.phib = self.pad_empty_kpts(phib, ndown, noccs[1])
+
+        else:
+            self.phia = phia
+            self.phib = phib
+
         self.detR = xp.exp(log_det - self.detR_shift)
         self.ovlp = self.ovlp / self.detR
 
