@@ -27,7 +27,7 @@ class KptSingleDet(TrialWavefunctionBase):
         assert len(wavefunction.shape) == 3 # nkpts, nbasis, nocc
         super().__init__(wavefunction, num_elec, num_basis, verbose=verbose)
         if verbose:
-            print("# Parsing input options for trial_wavefunction.MultiSlater.")
+            print("# Parsing input options for trial_wavefunction.KptSingleDet.")
         self.psi = wavefunction
         self.num_elec = num_elec
         self.nk = nkpts
