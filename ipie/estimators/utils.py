@@ -173,11 +173,17 @@ def gabk_spin(A, B, noccs):
         nocca_ik = noccs[0, ik]
         if nocca_ik == 0: continue
         GA[ik], GAH[ik] = gab_mod(A[ik, :, :nocca_ik], B[ik, :, :nocca_ik])
+
     if nb > 0:
         for ik in range(nk):
             nocca_ik, noccb_ik = noccs[:, ik]
             if noccb_ik == 0: continue
-            GB[ik], GBH[ik] = gab_mod(A[ik, :, nocca_ik:], B[ik, :, nocca_ik:])
+            if (nocca_ik == 0) and (na > 0):
+                GB[ik], GBH[ik] = gab_mod(A[ik, :, nocca_ik+1:], B[ik, :, nocca_ik+1:])
+            
+            else:
+                GB[ik], GBH[ik] = gab_mod(A[ik, :, nocca_ik:], B[ik, :, nocca_ik:])
+
     return numpy.array([GA, GB]), [GAH, GBH]
 
 

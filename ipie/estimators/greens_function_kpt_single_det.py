@@ -54,10 +54,10 @@ def greens_function_kpt_single_det(walker_batch, trial, build_full=False):
         ovlpt = numpy.zeros((nk_occ, nup, nk, nup), dtype=numpy.complex128)
         for ik1 in range(nk_occ):
             for ik2 in range(nk):
-                if noccs[0, ik2] > 0:
-                    ovlpt[ik1, :, ik2, :] = numpy.dot(
-                            phia[iw, ik2, :, ik1, :].T, trial.psi0a[ik2].conj())
+                ovlpt[ik1, :, ik2, :] = numpy.dot(
+                        phia[iw, ik2, :, ik1, :].T, trial.psi0a[ik2].conj())
         
+        # Only keep k-points with non-zero occupation.
         ovlpt = ovlpt[:, :, noccs[0]>0].reshape(nk_occ*nup, nk_occ*nup)
         ovlpinvt = numpy.linalg.inv(ovlpt)
         phia_iw = xp.ascontiguousarray(phia[iw].reshape(nk*nbsf, nk_occ*nup))
@@ -81,6 +81,8 @@ def greens_function_kpt_single_det(walker_batch, trial, build_full=False):
                 for ik2 in range(nk):
                     ovlpt[ik1, :, ik2, :] = numpy.dot(
                             phib[iw, ik2, :, ik1, :].T, trial.psi0b[ik2].conj())
+
+            # Only keep k-points with non-zero occupation.
             ovlpt = ovlpt[:, :, noccs[1]>0].reshape(nk_occ*ndown, nk_occ*ndown)
             sign_b, log_ovlp_b = xp.linalg.slogdet(ovlpt)
             ovlpinvt = numpy.linalg.inv(ovlpt)
@@ -123,12 +125,33 @@ def greens_function_kpt_single_det_batch(walker_batch, trial, build_full=False):
     ot : float64 / complex128
         Overlap with trial.
     """
+    def pad_empty_kpts(Ghalf, nelec_per_k, noccs):
+        if Ghalf is None: 
+            return None
+        
+        nwalkers = walker_batch.nwalkers
+        nk = noccs.shape[-1]
+        nk_occ = xp.sum(noccs)
+        nbsf = Ghalf.shape[-1] // nk
+        _Ghalf = Ghalf.reshape((nwalkers, nk_occ, -1, nk, nbsf))
+        Ghalf = xp.zeros((nwalkers, nk, nelec_per_k, nk, nbsf), dtype=_Ghalf.dtype)
+        Ghalf[:, noccs>0] = _Ghalf
+        return Ghalf.reshape((nwalkers, -1, nk*nbsf))
+
     nup = trial.nalpha
     ndown = trial.nbeta
     nbsf = trial.nbasis
     nk = trial.nk
+    noccs = walker_batch.noccs
+
+    if noccs is not None:
+        phia = walker_batch.remove_empty_kpts(walker_batch.phia, nk*nup, noccs[0])
+        phib = walker_batch.remove_empty_kpts(walker_batch.phib, nk*ndown, noccs[1])
+
     phia = xp.ascontiguousarray(
             walker_batch.phia.reshape(walker_batch.nwalkers, nk, nbsf, nk, nup))
+    nk_occ = phia.shape[3]
+
     if ndown > 0:
         phib = xp.ascontiguousarray(
                 walker_batch.phib.reshape(walker_batch.nwalkers, nk, nbsf, nk, ndown))
@@ -136,12 +159,14 @@ def greens_function_kpt_single_det_batch(walker_batch, trial, build_full=False):
         phib = None
     
     ovlp_a = xp.einsum("wlpki, lpj->wkilj", phia, trial.psi0a.conj(), optimize=True)
-    ovlp_a = ovlp_a.reshape(walker_batch.nwalkers, nk * nup, nk * nup)
+    ovlp_a = ovlp_a[:, :, :, noccs[0]>0].reshape(
+            walker_batch.nwalkers, nk_occ * nup, nk_occ * nup)
     ovlp_inv_a = xp.linalg.inv(ovlp_a)
     sign_a, log_ovlp_a = xp.linalg.slogdet(ovlp_a)
 
     # walker_batch.Ghalfa = xp.einsum("wij,wmj->wim", ovlp_inv_a, walker_batch.phia, optimize=True)
-    walker_batch.Ghalfa = xp.matmul(ovlp_inv_a, walker_batch.phia.transpose(0, 2, 1))
+    Ghalfa = xp.matmul(ovlp_inv_a, phia.transpose(0, 2, 1))
+    walker_batch.Ghalfa = pad_empty_kpts(Ghalfa, nup, noccs[0])
     if not trial.half_rotated or build_full:
         Ga = xp.einsum(
             "kpi,wkilq->wkplq", trial.psi0a.conj(), walker_batch.Ghalfa, optimize=True
@@ -149,12 +174,15 @@ def greens_function_kpt_single_det_batch(walker_batch, trial, build_full=False):
         walker_batch.Ga = Ga.reshape(walker_batch.nwalkers, nk, nbsf, nk, nbsf)
 
     if ndown > 0 and not walker_batch.rhf:
+        nk_occ = phib.shape[3]
         ovlp_b = xp.einsum("wlpki, lpj->wkilj", phib, trial.psi0b.conj(), optimize=True)
-        ovlp_b = ovlp_b.reshape(walker_batch.nwalkers, nk * ndown, nk * ndown)
+        ovlp_b = ovlp_b[:, :, :, noccs[1]>0].reshape(
+                walker_batch.nwalkers, nk_occ * ndown, nk_occ * ndown)
         ovlp_inv_b = xp.linalg.inv(ovlp_b)
         sign_b, log_ovlp_b = xp.linalg.slogdet(ovlp_b)
 
-        walker_batch.Ghalfb = xp.matmul(ovlp_inv_b, walker_batch.phib.transpose(0, 2, 1))
+        Ghalfb = xp.matmul(ovlp_inv_b, phib.transpose(0, 2, 1))
+        walker_batch.Ghalfb = pad_empty_kpts(Ghalfb, ndown, noccs[1])
         if not trial.half_rotated or build_full:
             Gb = xp.einsum(
                 "kpi,wkilq->wkplq", trial.psi0b.conj(), walker_batch.Ghalfb, optimize=True

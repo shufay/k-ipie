@@ -103,19 +103,13 @@ class UHFWalkers(BaseWalkers):
         if phi is None: 
             return None
         
-        if phi.ndim < 3:
-            nk = noccs.shape[-1]
-            nbsf = phi.shape[0] // nk
-            nelec_per_k = nelec // nk
-            _phi = phi.reshape((nk, nbsf, nk, nelec_per_k))
-            _phi = _phi[:, :, noccs>0]
-            return _phi.reshape((nk*nbsf, -1))
-
         nwalkers = phi.shape[0]
         nk = noccs.shape[-1]
         nbsf = phi.shape[1] // nk
-        nelec_per_k = nelec // nk
+        nelec_per_k = nelec // nk # nelec = nk * nelec_per_k.
         _phi = phi.reshape((nwalkers, nk, nbsf, nk, nelec_per_k))
+        
+        # Only keep k-points with non-zero occupation.
         _phi = _phi[:, :, :, noccs>0]
         return _phi.reshape((nwalkers, nk*nbsf, -1))
 
@@ -123,23 +117,15 @@ class UHFWalkers(BaseWalkers):
         if phi is None: 
             return None
         
-        if phi.ndim < 3:
-            nk = noccs.shape[-1]
-            nk_occ = xp.sum(noccs)
-            nbsf = phi.shape[0] // nk
-            nelec_per_k = nelec // nk
-            _phi = phi.reshape((nk, nbsf, nk_occ, -1))
-            phi = xp.zeros((nk, nbsf, nk, nelec_per_k), dtype=_phi.dtype)
-            phi[:, :, noccs>0] = _phi
-            return phi.reshape((nk*nbsf, -1))
-
         nwalkers = phi.shape[0]
         nk = noccs.shape[-1]
         nk_occ = xp.sum(noccs)
         nbsf = phi.shape[1] // nk
-        nelec_per_k = nelec // nk
+        nelec_per_k = nelec // nk # nelec = nk * nelec_per_k
         _phi = phi.reshape((nwalkers, nk, nbsf, nk_occ, -1))
         phi = xp.zeros((nwalkers, nk, nbsf, nk, nelec_per_k), dtype=_phi.dtype)
+        
+        # Fill the non-zero elements.
         phi[:, :, :, noccs>0] = _phi
         return phi.reshape((nwalkers, nk*nbsf, -1))
 
