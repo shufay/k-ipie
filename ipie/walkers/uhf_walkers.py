@@ -22,6 +22,7 @@ from ipie.config import config
 from ipie.utils.backend import arraylib as xp
 from ipie.utils.backend import cast_to_device, qr, qr_mode, synchronize
 from ipie.walkers.base_walkers import BaseWalkers
+from ipie.walkers.reortho_nonzero import batched_qr_nonzero
 
 
 class UHFWalkers(BaseWalkers):
@@ -29,8 +30,18 @@ class UHFWalkers(BaseWalkers):
 
     Parameters
     ----------
+    initial_walker : :class:`numpy.ndarray`
+        Initial UHF coefficient matrix.
+    nup, ndown : int
+        Number of spin up, down electrons.
+    nbasis : int
+        Number of basis functions.
     nwalkers : int
-        The number of walkers in this batch
+        Number of walkers.
+    mpi_handler : MPIHandler
+        MPIHandler instance.
+    verbose : bool
+        Verbosity.
     """
 
     def __init__(
@@ -41,6 +52,10 @@ class UHFWalkers(BaseWalkers):
         nbasis: int,
         nwalkers: int,
         mpi_handler,
+        write_filepath=None,
+        write_restart=False,
+        write_freq=None,
+        write_time=None,
         verbose: bool = False,
     ):
         assert len(initial_walker.shape) == 2
@@ -49,7 +64,8 @@ class UHFWalkers(BaseWalkers):
         self.nbasis = nbasis
         self.mpi_handler = mpi_handler
 
-        super().__init__(nwalkers, verbose=verbose)
+        super().__init__(nwalkers, write_filepath=write_filepath, write_restart=write_restart,
+                         write_freq=write_freq, write_time=write_time, verbose=verbose)
 
         # should completely deprecate these
         self.field_configs = None
@@ -79,12 +95,9 @@ class UHFWalkers(BaseWalkers):
         self.Ghalfa = numpy.zeros(
             shape=(self.nwalkers, self.nup, self.nbasis), dtype=numpy.complex128
         )
-        if ndown > 0:
-            self.Ghalfb = numpy.zeros(
-                shape=(self.nwalkers, self.ndown, self.nbasis), dtype=numpy.complex128
-            )
-        else:
-            self.Ghalfb = None
+        self.Ghalfb = numpy.zeros(
+            shape=(self.nwalkers, self.ndown, self.nbasis), dtype=numpy.complex128
+        )
 
         self.buff_names += ["phia", "phib"]
 
@@ -92,61 +105,66 @@ class UHFWalkers(BaseWalkers):
         self.walker_buffer = numpy.zeros(self.buff_size, dtype=numpy.complex128)
 
         self.rhf = False  # interfacing with old codes...
+        self.padding=False
 
     def build(self, trial):
-        self.ovlp = trial.calc_greens_function(self)
+        ovlp = trial.calc_greens_function(self)
+        # if it is a 3-tuple
+        if isinstance(ovlp, tuple):
+            self.ovlp, self.sgn_ovlp, self.log_ovlp = ovlp
+        else:
+            self.ovlp = ovlp
+        if hasattr(trial, 'noccas') and trial.noccas is not None:
+            if trial.noccas is not None:
+                self.padding = True
 
     # This function casts relevant member variables into cupy arrays
     def cast_to_cupy(self, verbose=False):
         cast_to_device(self, verbose)
 
     def reortho(self):
-        """reorthogonalise walkers.
+        """reorthogonalise walkers."""
+        if self.padding:
+            return self.reortho_nonzero()
+        else:
+            if config.get_option("use_gpu"):   
+                return self.reortho_batched()
+            ndown = self.ndown
+            detR = []
+            for iw in range(self.nwalkers):
+                (self.phia[iw], Rup) = qr(self.phia[iw], mode=qr_mode)
+                # TODO: FDM This isn't really necessary, the absolute value of the
+                # weight is used for population control so this shouldn't matter.
+                # I think this is a legacy thing.
+                # Wanted detR factors to remain positive, dump the sign in orbitals.
+                Rup_diag = xp.diag(Rup)
+                signs_up = xp.sign(Rup_diag)
+                self.phia[iw] = xp.dot(self.phia[iw], xp.diag(signs_up))
 
-        parameters
-        ----------
-        """
-        if config.get_option("use_gpu"):
-            return self.reortho_batched()
-        ndown = self.ndown
-        detR = []
-        for iw in range(self.nwalkers):
-            (self.phia[iw], Rup) = qr(self.phia[iw], mode=qr_mode)
-            # TODO: FDM This isn't really necessary, the absolute value of the
-            # weight is used for population control so this shouldn't matter.
-            # I think this is a legacy thing.
-            # Wanted detR factors to remain positive, dump the sign in orbitals.
-            Rup_diag = xp.diag(Rup)
-            signs_up = xp.sign(Rup_diag)
-            self.phia[iw] = xp.dot(self.phia[iw], xp.diag(signs_up))
+                # include overlap factor
+                # det(R) = \prod_ii R_ii
+                # det(R) = exp(log(det(R))) = exp((sum_i log R_ii) - C)
+                # C factor included to avoid over/underflow
+                log_det = xp.sum(xp.log(xp.abs(Rup_diag)))
 
-            # include overlap factor
-            # det(R) = \prod_ii R_ii
-            # det(R) = exp(log(det(R))) = exp((sum_i log R_ii) - C)
-            # C factor included to avoid over/underflow
-            log_det = xp.sum(xp.log(xp.abs(Rup_diag)))
+                if ndown > 0:
+                    (self.phib[iw], Rdn) = qr(self.phib[iw], mode=qr_mode)
+                    Rdn_diag = xp.diag(Rdn)
+                    signs_dn = xp.sign(Rdn_diag)
+                    self.phib[iw] = xp.dot(self.phib[iw], xp.diag(signs_dn))
+                    log_det += sum(xp.log(abs(Rdn_diag)))
 
-            if ndown > 0:
-                (self.phib[iw], Rdn) = qr(self.phib[iw], mode=qr_mode)
-                Rdn_diag = xp.diag(Rdn)
-                signs_dn = xp.sign(Rdn_diag)
-                self.phib[iw] = xp.dot(self.phib[iw], xp.diag(signs_dn))
-                log_det += sum(xp.log(abs(Rdn_diag)))
-
-            detR += [xp.exp(log_det - self.detR_shift[iw])]
-            self.log_detR[iw] += xp.log(detR[iw])
-            self.detR[iw] = detR[iw]
-            self.ovlp[iw] = self.ovlp[iw] / detR[iw]
-
+                detR += [xp.exp(log_det - self.detR_shift[iw])]
+                self.log_detR[iw] += xp.log(detR[iw])
+                self.detR[iw] = detR[iw]
+                self.ovlp[iw] = self.ovlp[iw] / detR[iw]
+                self.log_ovlp[iw] = self.log_ovlp[iw] - (log_det - self.detR_shift[iw])
+            
         synchronize()
         return detR
 
     def reortho_batched(self):
-        """reorthogonalise walkers.
-
-        parameters
-        ----------
-        """
+        """reorthogonalise walkers."""
         assert config.get_option("use_gpu")
         (self.phia, Rup) = qr(self.phia, mode=qr_mode)
         Rup_diag = xp.einsum("wii->wi", Rup)
@@ -158,21 +176,41 @@ class UHFWalkers(BaseWalkers):
             log_det += xp.einsum("wi->w", xp.log(abs(Rdn_diag)))
         self.detR = xp.exp(log_det - self.detR_shift)
         self.ovlp = self.ovlp / self.detR
+        self.log_ovlp = self.log_ovlp - (log_det - self.detR_shift)
 
         synchronize()
 
         return self.detR
+    
+    def reortho_nonzero(self):
+        (self.phia, log_det) = batched_qr_nonzero(self.phia, mode=qr_mode)
+        if self.ndown > 0:
+            (self.phib, log_det_dn) = batched_qr_nonzero(self.phib, mode=qr_mode)
+            log_det += log_det_dn
+        self.detR = xp.exp(log_det - self.detR_shift)
+        self.ovlp = self.ovlp / self.detR
+        self.log_ovlp = self.log_ovlp - (log_det - self.detR_shift)
+        synchronize()
 
+        return self.detR
 
 class UHFWalkersParticleHole(UHFWalkers):
     """UHF style walker specialized for its use with ParticleHole trial.
 
     Parameters
     ----------
-    system : object
-        System object.
+    initial_walker : :class:`numpy.ndarray`
+        Initial UHF coefficient matrix.
+    nup, ndown : int
+        Number of spin up, down electrons.
+    nbasis : int
+        Number of basis functions.
     nwalkers : int
-        The number of walkers in this batch
+        Number of walkers.
+    mpi_handler : MPIHandler
+        MPIHandler instance.
+    verbose : bool
+        Verbosity.
     """
 
     def __init__(
@@ -227,6 +265,14 @@ class UHFWalkersParticleHole(UHFWalkers):
             shape=(self.nwalkers, trial.nact, trial.nocc_beta),
             dtype=numpy.complex128,
         )
+        if config.get_option("use_gpu"):
+            self.cast_to_cupy()
+            self.Ga = xp.asarray(self.Ga)
+            self.Gb = xp.asarray(self.Gb)
+            trial._rchola = xp.asarray(trial._rchola)
+            trial._rcholb = xp.asarray(trial._rcholb)
+            trial._rchola_act = xp.asarray(trial._rchola_act)
+
         self.ovlp = trial.calc_greens_function(self)
 
 
@@ -235,10 +281,18 @@ class UHFWalkersNOCI(UHFWalkers):
 
     Parameters
     ----------
-    system : object
-        System object.
+    initial_walker : :class:`numpy.ndarray`
+        Initial UHF coefficient matrix.
+    nup, ndown : int
+        Number of spin up, down electrons.
+    nbasis : int
+        Number of basis functions.
     nwalkers : int
-        The number of walkers in this batch
+        Number of walkers.
+    mpi_handler : MPIHandler
+        MPIHandler instance.
+    verbose : bool
+        Verbosity.
     """
 
     def build(self, trial):
@@ -270,10 +324,18 @@ class UHFWalkersParticleHoleNaive(UHFWalkersParticleHole):
 
     Parameters
     ----------
-    system : object
-        System object.
+    initial_walker : :class:`numpy.ndarray`
+        Initial UHF coefficient matrix.
+    nup, ndown : int
+        Number of spin up, down electrons.
+    nbasis : int
+        Number of basis functions.
     nwalkers : int
-        The number of walkers in this batch
+        Number of walkers.
+    mpi_handler : MPIHandler
+        MPIHandler instance.
+    verbose : bool
+        Verbosity.
     """
 
     def __init__(

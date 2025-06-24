@@ -9,8 +9,12 @@ from ipie.utils.backend import synchronize, cast_to_device
 
 import plum
 from ipie.trial_wavefunction.wavefunction_base import TrialWavefunctionBase
-from ipie.hamiltonians.generic import GenericRealChol, GenericComplexChol
-from ipie.hamiltonians.generic_chunked import GenericRealCholChunked
+from ipie.trial_wavefunction.noci import NOCI
+from ipie.trial_wavefunction.particle_hole import ParticleHole
+from ipie.trial_wavefunction.single_det import SingleDet
+from ipie.trial_wavefunction.single_det_ghf import SingleDetGHF
+from ipie.hamiltonians.generic import GenericRealChol, GenericComplexChol, GenericRealISDF, GenericComplexISDF
+from ipie.hamiltonians.generic_chunked import GenericRealCholChunked, GenericRealISDFChunked
 from typing import Union
 
 try:
@@ -22,7 +26,7 @@ from ipie.utils.mpi import make_splits_displacements
 
 @plum.dispatch
 def construct_one_body_propagator(
-    hamiltonian: Union[GenericRealChol, GenericRealCholChunked], mf_shift: xp.ndarray, dt: float
+    hamiltonian: Union[GenericRealChol, GenericRealCholChunked, GenericRealISDF, GenericRealISDFChunked], mf_shift: xp.ndarray, dt: float
 ):
     r"""Construct mean-field shifted one-body propagator.
 
@@ -35,27 +39,46 @@ def construct_one_body_propagator(
     ----------
     hamiltonian : hamiltonian class.
         Generic hamiltonian object.
+    mf_shift : xp.ndarray
+        Average value of Choleskies with respect to the trial wavefunction.
     dt : float
         Timestep.
     """
     nb = hamiltonian.nbasis
     if hamiltonian.chunked:
-        start_n = hamiltonian.chunk_displacements[hamiltonian.handler.srank]
-        end_n = hamiltonian.chunk_displacements[hamiltonian.handler.srank + 1]
-        if hasattr(mf_shift, "get"):
-            shift = 1j * numpy.einsum(
-                "mx,x->m", hamiltonian.chol_chunk, mf_shift.get()[start_n:end_n]
-            ).reshape(nb, nb)
+        if hasattr(hamiltonian, "chol_chunk"):
+            start_n = hamiltonian.chunk_displacements[hamiltonian.handler.srank]
+            end_n = hamiltonian.chunk_displacements[hamiltonian.handler.srank + 1]
+            if hasattr(mf_shift, "get"):
+                shift = 1j * numpy.einsum(
+                    "mx,x->m", hamiltonian.chol_chunk, mf_shift.get()[start_n:end_n]
+                ).reshape(nb, nb)
+            else:
+                shift = 1j * numpy.einsum(
+                    "mx,x->m", hamiltonian.chol_chunk, mf_shift[start_n:end_n]
+                ).reshape(nb, nb)
+            if MPI is None:
+                raise ImportError("mpi4py is not installed.")
+            else:
+                shift = hamiltonian.handler.scomm.allreduce(shift, op=MPI.SUM)
+        elif hasattr(hamiltonian, "cholM_chunk"):
+            start_n = hamiltonian.chunk_displacements[hamiltonian.handler.srank]
+            end_n = hamiltonian.chunk_displacements[hamiltonian.handler.srank + 1]
+            shift = 1j * xp.einsum(
+                "Pp, Pq, Pg, g -> pq", hamiltonian.cgto, hamiltonian.cgto, hamiltonian.cholM_chunk, mf_shift[start_n:end_n], optimize=True
+            )
+            if MPI is None:
+                raise ImportError("mpi4py is not installed.")
+            else:
+                shift = hamiltonian.handler.scomm.allreduce(shift, op=MPI.SUM)
         else:
-            shift = 1j * numpy.einsum(
-                "mx,x->m", hamiltonian.chol_chunk, mf_shift[start_n:end_n]
-            ).reshape(nb, nb)
-        if MPI is None:
-            raise ImportError("mpi4py is not installed.")
-        else:
-            shift = hamiltonian.handler.scomm.allreduce(shift, op=MPI.SUM)
-    else:
+            raise ValueError("chol_chunk or cholM_chunk not found in hamiltonian.")
+    elif hasattr(hamiltonian, "chol"):
         shift = 1j * numpy.einsum("mx,x->m", hamiltonian.chol, mf_shift).reshape(nb, nb)
+    elif hasattr(hamiltonian, "cholM"):
+        shift = 1j * xp.einsum(
+            "Pp, Pq, Pg, g -> pq", hamiltonian.cgto, hamiltonian.cgto, hamiltonian.cholM, mf_shift, optimize=True
+        )
     shift = xp.array(shift)
     H1 = hamiltonian.h1e_mod - xp.array([shift, shift])
     if hasattr(H1, "get"):
@@ -70,6 +93,22 @@ def construct_one_body_propagator(
 
 @plum.dispatch
 def construct_one_body_propagator(hamiltonian: GenericComplexChol, mf_shift: xp.ndarray, dt: float):
+    r"""Construct mean-field shifted one-body propagator.
+
+    .. math::
+
+        H1 \rightarrow H1 - v0
+        v0_{ik} = \sum_n v_{(ik),n} \bar{v}_n
+
+    Parameters
+    ----------
+    hamiltonian : hamiltonian class.
+        Generic hamiltonian object.
+    mf_shift : xp.ndarray
+        Average value of Choleskies with respect to the trial wavefunction.
+    dt : float
+        Timestep.
+    """
     nb = hamiltonian.nbasis
     nchol = hamiltonian.nchol
     shift = numpy.zeros((nb, nb), dtype=hamiltonian.chol.dtype)
@@ -92,9 +131,11 @@ def construct_mean_field_shift(hamiltonian: GenericRealCholChunked, trial: Trial
         \bar{v}_n = \sum_{ik\sigma} v_{(ik),n} G_{ik\sigma}
 
     """
-    # hamiltonian.chol [X, M^2]
+    # hamiltonian.chol [M^2, nchol]
     Gcharge = (trial.G[0] + trial.G[1]).ravel()
-    # Use numpy to reduce GPU memory use at this point, otherwise will be a problem of large chol cases
+
+    # TODO: Use numpy to reduce GPU memory use at this point, otherwise will be
+    # a problem of large chol cases.
     tmp_real = numpy.dot(hamiltonian.chol_chunk.T, Gcharge.real)
     tmp_imag = numpy.dot(hamiltonian.chol_chunk.T, Gcharge.imag)
 
@@ -127,7 +168,9 @@ def construct_mean_field_shift(hamiltonian: GenericRealCholChunked, trial: Trial
 
 
 @plum.dispatch
-def construct_mean_field_shift(hamiltonian: GenericRealChol, trial: TrialWavefunctionBase):
+def construct_mean_field_shift(
+    hamiltonian: GenericRealChol, trial: Union[SingleDet, ParticleHole, NOCI]
+):
     r"""Compute mean field shift.
 
     .. math::
@@ -135,9 +178,11 @@ def construct_mean_field_shift(hamiltonian: GenericRealChol, trial: TrialWavefun
         \bar{v}_n = \sum_{ik\sigma} v_{(ik),n} G_{ik\sigma}
 
     """
-    # hamiltonian.chol [X, M^2]
+    # hamiltonian.chol [M^2, nchol]
     Gcharge = (trial.G[0] + trial.G[1]).ravel()
-    # Use numpy to reduce GPU memory use at this point, otherwise will be a problem of large chol cases
+
+    # TODO: Use numpy to reduce GPU memory use at this point, otherwise will be
+    # a problem of large chol cases.
     tmp_real = numpy.dot(hamiltonian.chol.T, Gcharge.real)
     tmp_imag = numpy.dot(hamiltonian.chol.T, Gcharge.imag)
     mf_shift = 1.0j * tmp_real - tmp_imag
@@ -145,7 +190,7 @@ def construct_mean_field_shift(hamiltonian: GenericRealChol, trial: TrialWavefun
 
 
 @plum.dispatch
-def construct_mean_field_shift(hamiltonian: GenericComplexChol, trial: TrialWavefunctionBase):
+def construct_mean_field_shift(hamiltonian: GenericRealChol, trial: SingleDetGHF):
     r"""Compute mean field shift.
 
     .. math::
@@ -153,30 +198,147 @@ def construct_mean_field_shift(hamiltonian: GenericComplexChol, trial: TrialWave
         \bar{v}_n = \sum_{ik\sigma} v_{(ik),n} G_{ik\sigma}
 
     """
-    # hamiltonian.chol [X, M^2]
-    Gcharge = (trial.G[0] + trial.G[1]).ravel()
+    # hamiltonian.chol [M^2, nchol]
+    nbasis = hamiltonian.nbasis
+    Gaa = trial.G[:nbasis, :nbasis]
+    Gbb = trial.G[nbasis:, nbasis:]
+    Gcharge = (Gaa + Gbb).ravel()
 
+    # TODO: Use numpy to reduce GPU memory use at this point, otherwise will be
+    # a problem of large chol cases.
+    tmp_real = numpy.dot(hamiltonian.chol.T, Gcharge.real)
+    tmp_imag = numpy.dot(hamiltonian.chol.T, Gcharge.imag)
+    mf_shift = 1.0j * tmp_real - tmp_imag
+    return xp.array(mf_shift)
+
+
+@plum.dispatch
+def construct_mean_field_shift(
+    hamiltonian: GenericComplexChol, trial: Union[SingleDet, ParticleHole, NOCI]
+):
+    r"""Compute mean field shift.
+
+    .. math::
+
+        \bar{v}_n = \sum_{ik\sigma} v_{(ik),n} G_{ik\sigma}
+
+    """
+    # hamiltonian.chol [M^2, nchol]
+    Gcharge = (trial.G[0] + trial.G[1]).ravel()
     nchol = hamiltonian.nchol
     nfields = hamiltonian.nfields
-
     mf_shift = numpy.zeros(nfields, dtype=hamiltonian.chol.dtype)
     mf_shift[:nchol] = 1j * numpy.dot(hamiltonian.A.T, Gcharge.ravel())
     mf_shift[nchol:] = 1j * numpy.dot(hamiltonian.B.T, Gcharge.ravel())
     return mf_shift
 
 
+# TODO: check.
+@plum.dispatch
+def construct_mean_field_shift(hamiltonian: GenericComplexChol, trial: SingleDetGHF):
+    r"""Compute mean field shift.
+
+    .. math::
+
+        \bar{v}_n = \sum_{ik\sigma} v_{(ik),n} G_{ik\sigma}
+
+    """
+    # hamiltonian.chol [M^2, nchol]
+    nbasis = hamiltonian.nbasis
+    Gaa = trial.G[:nbasis, :nbasis]
+    Gbb = trial.G[nbasis:, nbasis:]
+    Gcharge = (Gaa + Gbb).ravel()
+    nchol = hamiltonian.nchol
+    nfields = hamiltonian.nfields
+    mf_shift = numpy.zeros(nfields, dtype=hamiltonian.chol.dtype)
+    mf_shift[:nchol] = 1j * numpy.dot(hamiltonian.A.T, Gcharge.ravel())
+    mf_shift[nchol:] = 1j * numpy.dot(hamiltonian.B.T, Gcharge.ravel())
+    return mf_shift
+
+@plum.dispatch
+def construct_mean_field_shift(hamiltonian: GenericRealISDF, trial:Union[SingleDet, ParticleHole, NOCI]):
+    r"""Compute mean field shift.
+
+    .. math::
+
+        \bar{v}_n = \sum_{ik\sigma} v_{(ik),n} G_{ik\sigma}
+
+    """
+    # hamiltonian.chol [M^2, nchol]
+    Gcharge = (trial.G[0] + trial.G[1])
+
+    # TODO: Use numpy to reduce GPU memory use at this point, otherwise will be
+    # a problem of large chol cases.
+    tmp_real = numpy.einsum("Pp, Pr, Pg, pr -> g", hamiltonian.cgto, hamiltonian.cgto, hamiltonian.cholM, Gcharge.real, optimize=True)
+    tmp_imag = numpy.einsum("Pp, Pr, Pg, pr -> g", hamiltonian.cgto, hamiltonian.cgto, hamiltonian.cholM, Gcharge.imag, optimize=True)
+    mf_shift = 1.0j * tmp_real - tmp_imag
+    return xp.array(mf_shift)
+
+@plum.dispatch
+def construct_mean_field_shift(hamiltonian: GenericRealISDFChunked, trial: TrialWavefunctionBase):
+    r"""Compute mean field shift.
+
+    .. math::
+
+        \bar{v}_n = \sum_{ik\sigma} v_{(ik),n} G_{ik\sigma}
+
+    """
+    # hamiltonian.chol [M^2, nchol]
+    Gcharge = (trial.G[0] + trial.G[1])
+
+    tmp_real = numpy.einsum("Pp, Pr, Pg, pr -> g", hamiltonian.cgto, hamiltonian.cgto, hamiltonian.cholM_chunk, Gcharge.real, optimize=True)
+    tmp_imag = numpy.einsum("Pp, Pr, Pg, pr -> g", hamiltonian.cgto, hamiltonian.cgto, hamiltonian.cholM_chunk, Gcharge.imag, optimize=True)
+
+    split_sizes, displacements = make_splits_displacements(hamiltonian.nchol, trial.handler.ssize)
+    split_sizes_np = numpy.array(split_sizes, dtype=int)
+    displacements_np = numpy.array(displacements, dtype=int)
+
+    recvbuf_real = numpy.zeros(hamiltonian.nchol, dtype=tmp_real.dtype)
+    recvbuf_imag = numpy.zeros(hamiltonian.nchol, dtype=tmp_imag.dtype)
+
+    # print(split_sizes_np, displacements_np)
+    if MPI is None:
+        raise ImportError("mpi4py is not installed.")
+    else:
+        trial.handler.scomm.Gatherv(
+            tmp_real, [recvbuf_real, split_sizes_np, displacements_np, MPI.DOUBLE], root=0
+        )
+        trial.handler.scomm.Gatherv(
+            tmp_imag, [recvbuf_imag, split_sizes_np, displacements_np, MPI.DOUBLE], root=0
+        )
+
+    trial.handler.scomm.Bcast(recvbuf_real, root=0)
+    trial.handler.scomm.Bcast(recvbuf_imag, root=0)
+
+    mf_shift = 1.0j * recvbuf_real - recvbuf_imag
+
+    return xp.array(mf_shift)
+
+@plum.dispatch
+def construct_mean_field_shift(hamiltonian: GenericComplexISDF, trial:Union[SingleDet, ParticleHole, NOCI]):
+    r"""Compute mean field shift.
+
+    .. math::
+
+        \bar{v}_n = \sum_{ik\sigma} v_{(ik),n} G_{ik\sigma}
+
+    """
+    raise NotImplementedError(
+        "GenericComplexISDF does not have mean field shift yet."
+    )
+
 class PhaselessBase(ContinuousBase):
     """A base class for generic continuous HS transform AFQMC propagators."""
 
-    def __init__(self, time_step, verbose=False):
+    def __init__(self, time_step, ebound_const = 2.0, fbbound = 1.0, verbose=False):
         super().__init__(time_step, verbose=verbose)
         self.sqrt_dt = self.dt**0.5
         self.isqrt_dt = 1j * self.sqrt_dt
 
         self.nfb_trig = 0  # number of force bias triggered
         self.nhe_trig = 0  # number of hybrid enerby bound triggered
-        self.ebound = (2.0 / self.dt) ** 0.5  # energy bound range
-        self.fbbound = 1.0
+        self.ebound = (ebound_const / self.dt) ** 0.5  # energy bound range
+        self.fbbound = fbbound
         self.mpi_handler = None
 
     def build(self, hamiltonian, trial=None, walkers=None, mpi_handler=None, verbose=False):
@@ -266,7 +428,13 @@ class PhaselessBase(ContinuousBase):
         self.timer.tupdate += time.time() - start_time
 
     def update_weight(self, walkers, ovlp, ovlp_new, cfb, cmf, eshift):
-        ovlp_ratio = ovlp_new / ovlp
+        if isinstance(ovlp, tuple):
+            sgn_ovlp, log_ovlp = ovlp
+            assert isinstance(ovlp_new, tuple), "overlap new should also be a tuple"
+            sgn_ovlpnew, log_ovlpnew = ovlp_new
+            ovlp_ratio = sgn_ovlpnew / sgn_ovlp * xp.exp(log_ovlpnew - log_ovlp)
+        else:
+            ovlp_ratio = ovlp_new / ovlp
         hybrid_energy = -(xp.log(ovlp_ratio) + cfb + cmf) / self.dt
         hybrid_energy = self.apply_bound_hybrid(hybrid_energy, eshift)
         importance_function = xp.exp(
@@ -284,6 +452,9 @@ class PhaselessBase(ContinuousBase):
         )  # in-place clipping (cosine projection)
         walkers.weight = walkers.weight * magn * cosine_fac
         walkers.ovlp = ovlp_new
+        if isinstance(ovlp, tuple):
+            walkers.sgn_ovlp = sgn_ovlpnew
+            walkers.log_ovlp = log_ovlpnew
 
     def apply_bound_force_bias(self, xbar, max_bound=1.0):
         absxbar = xp.abs(xbar)

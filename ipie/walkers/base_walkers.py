@@ -18,7 +18,6 @@
 #
 
 import cmath
-import time
 from abc import ABCMeta, abstractmethod
 
 import h5py
@@ -97,6 +96,10 @@ class BaseWalkers(metaclass=ABCMeta):
     def __init__(
         self,
         nwalkers,
+        write_filepath=None,
+        write_restart=False,
+        write_freq=None,
+        write_time=None,
         verbose=False,
     ):
         self.nwalkers = nwalkers
@@ -105,25 +108,25 @@ class BaseWalkers(metaclass=ABCMeta):
             print("# Setting up BaseWalkers.")
             print(f"# nwalkers = {self.nwalkers}")
 
-        self.weight = numpy.array(
+        self.weight = xp.array(
             [1.0 for iw in range(self.nwalkers)]  # TODO: allow for arbitrary initial weights
         )
         self.unscaled_weight = self.weight.copy()
-        self.phase = numpy.array([1.0 + 0.0j for iw in range(self.nwalkers)])
+        self.phase = xp.array([1.0 + 0.0j for iw in range(self.nwalkers)])
 
-        self.ovlp = numpy.array([1.0 for iw in range(self.nwalkers)])
-        self.sgn_ovlp = numpy.array([1.0 for iw in range(self.nwalkers)])
-        self.log_ovlp = numpy.array([0.0 for iw in range(self.nwalkers)])
+        self.ovlp = xp.array([1.0 for iw in range(self.nwalkers)])
+        self.sgn_ovlp = xp.array([1.0 for iw in range(self.nwalkers)])
+        self.log_ovlp = xp.array([0.0 for iw in range(self.nwalkers)])
 
         # in case we use local energy approximation to the propagation
-        self.eloc = numpy.array([0.0 for iw in range(self.nwalkers)])
+        self.eloc = xp.array([0.0 for iw in range(self.nwalkers)])
 
-        self.hybrid_energy = numpy.array([0.0 for iw in range(self.nwalkers)])
-        self.detR = [1.0 for iw in range(self.nwalkers)]
+        self.hybrid_energy = xp.array([0.0 for iw in range(self.nwalkers)])
+        self.detR = xp.array([1.0 for iw in range(self.nwalkers)])
         self.detR_shift = xp.array([0.0 for iw in range(self.nwalkers)])
-        self.log_detR = [0.0 for iw in range(self.nwalkers)]
+        self.log_detR = xp.array([0.0 for iw in range(self.nwalkers)])
         self.log_shift = xp.array([0.0 for iw in range(self.nwalkers)])
-        self.log_detR_shift = [0.0 for iw in range(self.nwalkers)]
+        self.log_detR_shift = xp.array([0.0 for iw in range(self.nwalkers)])
 
         self.buff_names = [
             "weight",
@@ -136,8 +139,11 @@ class BaseWalkers(metaclass=ABCMeta):
         ]
         self.buff_size = None
         self.walker_buffer = None
-        self.write_file = None
-        self.read_file = None
+        self.write_filepath = write_filepath
+        self.read_filepath = write_filepath
+        self.write_restart = write_restart
+        self.write_freq = write_freq
+        self.write_time = write_time
 
         if verbose:
             print("# Finish setting up walkers.handler.Walkers.")
@@ -196,24 +202,41 @@ class BaseWalkers(metaclass=ABCMeta):
         self.phi = buff[self.nwalkers * 3 :].reshape(self.phi.shape)
 
     def write_walkers_batch(self, comm):
-        start = time.time()
-        assert self.write_file is not None
-        raise NotImplementedError("This is not tested. Please implement.")
-        with h5py.File(self.write_file, "r+", driver="mpio", comm=comm) as fh5:
-            # for (i,w) in enumerate(self.walkers):
-            # ix = i + self.nwalkers*comm.rank
-            fh5["walker_%d" % comm.rank][:] = self.get_write_buffer()
-        if comm.rank == 0:
-            print(" # Writing walkers to file.")
-            print(f" # Time to write restart: {time.time() - start:13.8e} s")
+        write_file = self.write_filepath + f"walkers_{comm.rank}.h5"
+        with h5py.File(write_file, "a") as fh5:
+            num_slices = len(fh5.keys()) // 3
+            phia = self.phia
+            phib = self.phib
+            weight = self.weight
+            hybrid_energy = self.hybrid_energy
+            if isinstance(phia, numpy.ndarray):
+                fh5[f"walker_timeslice_{num_slices}"] = numpy.array([phia, phib])
+                fh5[f"walker_weight_{num_slices}"] = weight
+                fh5[f"walker_hybrid_energy_{num_slices}"] = hybrid_energy
+            else:
+                fh5[f"walker_timeslice_{num_slices}"] = numpy.concatenate(
+                    [xp.asnumpy(phia), xp.asnumpy(phib)], axis=-1
+                )
+                fh5[f"walker_weight_{num_slices}"] = xp.asnumpy(weight)
+                fh5[f"walker_hybrid_energy_{num_slices}"] = xp.asnumpy(hybrid_energy)
 
-    def read_walkers_batch(self, comm):
-        assert self.write_file is not None
-        with h5py.File(self.read_file, "r") as fh5:
+    def read_walkers_batch(self, trial, comm):
+        read_file = self.write_filepath + f"walkers_{comm.rank}.h5"
+        with h5py.File(read_file, "r") as fh5:
             try:
-                self.set_walkers_from_buffer(fh5["walker_%d" % comm.rank][:])
+                num_slices = len(fh5.keys()) // 3 - 1
+                phia = fh5[f"walker_timeslice_{num_slices}"][0]
+                phib = fh5[f"walker_timeslice_{num_slices}"][1]
+                self.phia = xp.array(phia)
+                self.phib = xp.array(phib)
+                weight = fh5[f"walker_weight_{num_slices}"][:]
+                hybrid_energy = fh5[f"walker_hybrid_energy_{num_slices}"][:]
+                self.weight = xp.array(weight)
+                self.hybrid_energy = xp.array(hybrid_energy)
+                self.ovlp = trial.calc_greens_function(self)
+
             except KeyError:
-                print(f" # Could not read walker data from: {self.read_file}")
+                print(f" # Could not read walker data from: {read_file}")
 
     @abstractmethod
     def reortho(self):

@@ -5,14 +5,15 @@ from abc import abstractmethod
 from ipie.propagation.continuous_base import ContinuousBase
 from ipie.propagation.operations import propagate_one_body, propagate_one_body_kpt
 from ipie.utils.backend import arraylib as xp
-from ipie.utils.backend import synchronize, cast_to_device
+from ipie.utils.backend import synchronize, cast_to_device, free_blocks
 import h5py
 
 import plum
 from ipie.trial_wavefunction.single_det_kpt import KptSingleDet
 from ipie.hamiltonians.kpt_hamiltonian import KptComplexChol, KptComplexCholSymm, KptISDF
 from ipie.hamiltonians.kpt_chunked import KptComplexCholChunked
-from cuquantum import cutensornet, NetworkOptions, contract
+from cuquantum.bindings import cutensornet
+from cuquantum.tensornet import NetworkOptions, contract
 from typing import Union
 
 try:
@@ -317,15 +318,15 @@ def construct_mf_mod_xbar(hamiltonian: KptISDF, mf_shift: xp.ndarray):
 class PhaselessKptBase(ContinuousBase):
     """A base class for generic continuous HS transform AFQMC propagators."""
 
-    def __init__(self, time_step, verbose=False):
+    def __init__(self, time_step, ebound_const = 2.0, fbbound = 1.0, verbose=False):
         super().__init__(time_step, verbose=verbose)
         self.sqrt_dt = self.dt**0.5
         self.isqrt_dt = 1j * self.sqrt_dt
 
         self.nfb_trig = 0  # number of force bias triggered
         self.nhe_trig = 0  # number of hybrid enerby bound triggered
-        self.ebound = (2.0 / self.dt) ** 0.5  # energy bound range
-        self.fbbound = 1.0
+        self.ebound = (ebound_const / self.dt) ** 0.5  # energy bound range
+        self.fbbound = fbbound
         self.mpi_handler = None
 
     def build(self, hamiltonian, trial=None, walkers=None, mpi_handler=None, verbose=False):
@@ -377,6 +378,7 @@ class PhaselessKptBase(ContinuousBase):
         xbar_minus[:, :, igamma] = -self.sqrt_dt * (self.vbias_minus[:, :, igamma] - mf_xbarm[numpy.newaxis, :])
         xbar[0] = xbar_plus
         xbar[1] = xbar_minus
+        free_blocks()
         synchronize()
         self.timer.tfbias += time.time() - start_time
 
@@ -404,7 +406,7 @@ class PhaselessKptBase(ContinuousBase):
     def propagate_walkers(self, walkers, hamiltonian, trial, eshift):
         synchronize()
         start_time = time.time()
-        ovlp = trial.calc_greens_function(walkers)
+        _, sgn_ovlp, log_ovlp = trial.calc_greens_function(walkers)
         synchronize()
         self.timer.tgf += time.time() - start_time
 
@@ -420,24 +422,29 @@ class PhaselessKptBase(ContinuousBase):
 
         # Now apply phaseless approximation
         start_time = time.time()
-        ovlp_new = trial.calc_overlap(walkers)
+        _, sgn_ovlpnew, log_ovlpnew = trial.calc_overlap(walkers)
         synchronize()
         self.timer.tovlp += time.time() - start_time
 
         start_time = time.time()
-        self.update_weight(walkers, ovlp, ovlp_new, cfb, cmf, eshift)
+        self.update_weight(walkers, sgn_ovlp, log_ovlp, sgn_ovlpnew, log_ovlpnew, cfb, cmf, eshift)
         synchronize()
         self.timer.tupdate += time.time() - start_time
 
-    def update_weight(self, walkers, ovlp, ovlp_new, cfb, cmf, eshift):
-        ovlp_ratio = ovlp_new / ovlp
+    def update_weight(self, walkers, sgn_ovlp, log_ovlp, sgn_ovlpnew, log_ovlpnew, cfb, cmf, eshift):
+        ovlp_ratio = sgn_ovlpnew / sgn_ovlp * xp.exp(log_ovlpnew - log_ovlp)
         hybrid_energy = -(xp.log(ovlp_ratio) + cfb + cmf) / self.dt
         hybrid_energy = self.apply_bound_hybrid(hybrid_energy, eshift)
         importance_function = xp.exp(
             -self.dt * (0.5 * (hybrid_energy + walkers.hybrid_energy) - eshift)
         )
         magn = xp.abs(importance_function)
-        walkers.hybrid_energy = hybrid_energy
+        walkers.hybrid_energy = xp.where(
+            xp.isnan(hybrid_energy),       
+            walkers.hybrid_energy,        
+            hybrid_energy
+        )
+
 
         dtheta = (-self.dt * hybrid_energy - cfb).imag
         cosine_fac = xp.cos(dtheta)
@@ -446,7 +453,9 @@ class PhaselessKptBase(ContinuousBase):
             cosine_fac, a_min=0.0, a_max=None, out=cosine_fac
         )  # in-place clipping (cosine projection)
         walkers.weight = walkers.weight * magn * cosine_fac
-        walkers.ovlp = ovlp_new
+        walkers.ovlp = sgn_ovlpnew * xp.exp(log_ovlpnew - walkers.log_shift)
+        walkers.sgn_ovlp = sgn_ovlpnew
+        walkers.log_ovlp = log_ovlpnew
 
     def apply_bound_force_bias(self, xbar, max_bound=1.0):
         absxbar = xp.abs(xbar)

@@ -17,7 +17,8 @@ from ipie.walkers.uhf_walkers import UHFWalkers
 from numba import jit
 from ipie.utils.backend import get_device_memory
 from ipie.propagation.kernels import call_kernel_VHS_construction1, call_kernel_VHS_construction2
-from cuquantum import cutensornet, NetworkOptions, contract
+from cuquantum.bindings import cutensornet
+from cuquantum.tensornet import NetworkOptions, contract
 
 @jit(nopython=True, fastmath=True)
 def construct_VHS_kernel_symm(chol, sqrt_dt, xshifted, nk, nbasis, nwalkers, ikpq_mat, Sset, Qplus):
@@ -121,8 +122,8 @@ def construct_VHS_cuquantum(chol, sqrt_dt, xshifted, nk, nbasis, nwalkers, ikpq_
 class PhaselessKptChol(PhaselessKptBase):
     """A class for performing phaseless propagation with k-point Hamiltonian."""
 
-    def __init__(self, time_step, exp_nmax=6, verbose=False):
-        super().__init__(time_step, verbose=verbose)
+    def __init__(self, time_step, ebound_const = 2.0, fbbound = 1.0, exp_nmax=6, verbose=False):
+        super().__init__(time_step, ebound_const = ebound_const, fbbound = fbbound, verbose=verbose)
         self.exp_nmax = exp_nmax
 
     @plum.dispatch
@@ -194,8 +195,8 @@ class PhaselessKptChol(PhaselessKptBase):
 class PhaselessKptCholChunked(PhaselessKptChol):
     """A class for performing phaseless propagation with complex hamiltonian with k point symmetry."""
 
-    def __init__(self, time_step, exp_nmax=6, verbose=False):
-        super().__init__(time_step, exp_nmax=exp_nmax, verbose=verbose)
+    def __init__(self, time_step, ebound_const = 2.0, fbbound = 1.0, exp_nmax=6, verbose=False):
+        super().__init__(time_step, ebound_const = ebound_const, fbbound = fbbound, verbose=verbose)
 
     def build(self, hamiltonian, trial=None, walkers=None, mpi_handler=None, verbose=False):
         super().build(hamiltonian, trial, walkers, mpi_handler, verbose)
@@ -264,40 +265,60 @@ class PhaselessKptCholChunked(PhaselessKptChol):
 class PhaselessKptISDF(PhaselessKptBase):
     """A class for performing phaseless propagation with k-point Hamiltonian with ERI approximated by ISDF. Here we do not save VHS to save memory."""
 
-    def __init__(self, time_step, exp_nmax=6, verbose=False):
-        super().__init__(time_step, verbose=verbose)
+    def __init__(self, time_step, ebound_const = 2.0, fbbound = 1.0, exp_nmax=6, verbose=False):
+        super().__init__(time_step, ebound_const = ebound_const, fbbound = fbbound, verbose=verbose)
         self.exp_nmax = exp_nmax
 
     @plum.dispatch
     def apply_VHS(self, walkers: UHFWalkers, hamiltonian: GenericBase, xshifted: xp.ndarray):
-        start_time = time.time()
-        Lx, Lconjx = self.contract_cholM_xshifted(hamiltonian, xshifted)
-        self.timer.tvhs += time.time() - start_time
-        assert len(Lx.shape) == 3 # nwalkers, nq, nisdf
-
-        start_time = time.time()
-
         if config.get_option("use_gpu"):
-            Temp = xp.zeros(walkers.phia.shape, dtype=walkers.phia.dtype)
-            xp.copyto(Temp, walkers.phia)
-            handle = cutensornet.create()
-            network_opts = NetworkOptions(handle=handle)
-            for n in range(1, self.exp_nmax + 1):
-                Temp = apply_VHS_to_phi_batch(hamiltonian.cgto, Lx, Lconjx, Temp, hamiltonian.ikpq_mat, hamiltonian.ikmq_mat, hamiltonian.unique_k, network_opts) / n  # matmul use much less GPU memory than einsum
-                walkers.phia += Temp
-            del Temp
-            if walkers.ndown > 0 and not walkers.rhf:
-                Temp = xp.zeros(walkers.phib.shape, dtype=walkers.phib.dtype)
-                xp.copyto(Temp, walkers.phib)
+            #determine whether to use bigmem algo or not
+            nbsf = hamiltonian.nbasis
+            nk = hamiltonian.nk
+            nwalkers = walkers.nwalkers
+            occ_ratio = walkers.nup / walkers.nbasis if walkers.rhf else (walkers.nup + walkers.ndown) / (walkers.nbasis)
+            mem_vhs = 2* nwalkers * nbsf**2 * nk**2 * 16
+            if mem_vhs > 0.45 * xp.cuda.Device().mem_info[0] or occ_ratio < 0.2:
+                start_time = time.time()
+                Lx, Lconjx = self.contract_cholM_xshifted(hamiltonian, xshifted)
+                self.timer.tvhs += time.time() - start_time
+                assert len(Lx.shape) == 3 # nwalkers, nq, nisdf
+
+                start_time = time.time()
+                Temp = xp.zeros(walkers.phia.shape, dtype=walkers.phia.dtype)
+                xp.copyto(Temp, walkers.phia)
+                handle = cutensornet.create()
                 for n in range(1, self.exp_nmax + 1):
-                    Temp = apply_VHS_to_phi_batch(hamiltonian.cgto, Lx, Lconjx, Temp, hamiltonian.ikpq_mat, hamiltonian.ikmq_mat, hamiltonian.unique_k, network_opts) / n  # matmul use much less GPU memory than einsum
-                    walkers.phib += Temp
+                    Temp = apply_VHS_to_phi_batch(hamiltonian.cgto, Lx, Lconjx, Temp, hamiltonian.ikpq_mat, hamiltonian.ikmq_mat, hamiltonian.unique_k, handle) / n  # matmul use much less GPU memory than einsum
+                    walkers.phia += Temp
                 del Temp
-            cutensornet.destroy(handle)
+                if walkers.ndown > 0 and not walkers.rhf:
+                    Temp = xp.zeros(walkers.phib.shape, dtype=walkers.phib.dtype)
+                    xp.copyto(Temp, walkers.phib)
+                    for n in range(1, self.exp_nmax + 1):
+                        Temp = apply_VHS_to_phi_batch(hamiltonian.cgto, Lx, Lconjx, Temp, hamiltonian.ikpq_mat, hamiltonian.ikmq_mat, hamiltonian.unique_k, handle) / n  # matmul use much less GPU memory than einsum
+                        walkers.phib += Temp
+                    del Temp
+                cutensornet.destroy(handle)
+            else:
+                start_time = time.time()
+                Lx, Lconjx = self.contract_cholM_xshifted(hamiltonian, xshifted)
+                handle = cutensornet.create()
+                VHS = construct_VHS_batch(hamiltonian.cgto, Lx, Lconjx, hamiltonian.ikpq_mat, hamiltonian.ikmq_mat, hamiltonian.unique_k, handle)
+                cutensornet.destroy(handle)
+                synchronize()
+                self.timer.tvhs += time.time() - start_time
+                assert len(Lx.shape) == 3 # nwalkers, nq, nisdf
+
+                start_time = time.time()
+                walkers.phia = apply_exponential_batch(walkers.phia, VHS, self.exp_nmax)
+                if walkers.ndown > 0 and not walkers.rhf:
+                    walkers.phib = apply_exponential_batch(walkers.phib, VHS, self.exp_nmax)
+            synchronize()
+            self.timer.tgemm += time.time() - start_time                
         else:
             raise NotImplementedError
-        synchronize()
-        self.timer.tgemm += time.time() - start_time
+        
 
     def contract_cholM_xshifted(self, hamiltonian, xshifted):
         cholM = hamiltonian.cholM # q, P, gamma
@@ -344,7 +365,7 @@ def construct_full_Lx_batch(Lx, kpq_mat, unique_qs):
 
     return fullLconjx
         
-def apply_VHS_to_phi_batch(cgto, Lx, Lconjx, phi, kpq_mat, kmq_mat, unique_qs, network_opts):
+def apply_VHS_to_phi_batch(cgto, Lx, Lconjx, phi, kpq_mat, kmq_mat, unique_qs, handle):
     """
     Apply VHS to phi in batch.
     """
@@ -352,9 +373,10 @@ def apply_VHS_to_phi_batch(cgto, Lx, Lconjx, phi, kpq_mat, kmq_mat, unique_qs, n
     nk = kpq_mat.shape[1]
     nbsf = cgto.shape[2]
     nisdf = Lx.shape[-1]
+    nknocc = phi.shape[-1]
     outphi = xp.zeros_like(phi)
     # calculate intermediate array memory
-    mem_cost = nwalkers * nk * nk * nisdf * nbsf * 16 * 2/ 1024**3
+    mem_cost = nwalkers * nisdf * nisdf * nknocc * 16 * 4/ 1024**3
     # max_mem = 80 percent of available memory
     max_mem = 0.3 * xp.cuda.Device().mem_info[0] / 1024**3
     num_nisdf_chunks = max(1, math.ceil(mem_cost / max_mem))
@@ -372,11 +394,47 @@ def apply_VHS_to_phi_batch(cgto, Lx, Lconjx, phi, kpq_mat, kmq_mat, unique_qs, n
         fullLpLconjx = full_Lx + full_Lconjx
         phi_reshape = phi.reshape(nwalkers, nk, nbsf, nk, -1)
         cgto_slice = cgto[:, i * nisdf_chunk_size: i * nisdf_chunk_size + nisdf_chunk, :]
+        network_opts = NetworkOptions(handle=handle, memory_limit=0.8 * xp.cuda.Device().mem_info[0])
         out = contract('wKkP, kPp, KPr, wKrQi -> wkpQi', fullLpLconjx, cgto_slice.conj(), cgto_slice, phi_reshape, options=network_opts)
         del full_Lx, full_Lconjx, fullLpLconjx, cgto_slice, phi_reshape
         outphi += out.reshape(nwalkers, nk * nbsf, -1)
         del out
     xp._default_memory_pool.free_all_blocks()
     return outphi
+
+def construct_VHS_batch(cgto, Lx, Lconjx, kpq_mat, kmq_mat, unique_qs, handle):
+    """
+    Apply VHS to phi in batch.
+    """
+    nwalkers = Lx.shape[0]
+    nk = kpq_mat.shape[1]
+    nbsf = cgto.shape[2]
+    nisdf = Lx.shape[-1]
+    outvhs = xp.zeros((nwalkers, nk * nbsf, nk * nbsf), dtype=xp.complex128)
+    # calculate intermediate array memory
+    mem_cost = nwalkers * nk * nk * nisdf * nbsf * 16 * 4/ 1024**3
+    # max_mem = 80 percent of available memory
+    max_mem = 0.3 * xp.cuda.Device().mem_info[0] / 1024**3
+    num_nisdf_chunks = max(1, math.ceil(mem_cost / max_mem))
+    nisdf_chunk_size = math.ceil(nisdf / num_nisdf_chunks)
+    nisdf_left = nisdf
+    for i in range(num_nisdf_chunks):
+        if nisdf_left == 0:
+            break
+        nisdf_chunk = min(nisdf_chunk_size, nisdf_left)
+        nisdf_left -= nisdf_chunk
+        Lx_chunk = Lx[:, :, i * nisdf_chunk_size: i * nisdf_chunk_size + nisdf_chunk]
+        Lconjx_chunk = Lconjx[:, :, i * nisdf_chunk_size: i * nisdf_chunk_size + nisdf_chunk]
+        full_Lx = construct_full_Lx_batch(Lx_chunk, kpq_mat, unique_qs)
+        full_Lconjx = construct_full_Lx_batch(Lconjx_chunk, kmq_mat, unique_qs)
+        fullLpLconjx = full_Lx + full_Lconjx
+        cgto_slice = cgto[:, i * nisdf_chunk_size: i * nisdf_chunk_size + nisdf_chunk, :]
+        network_opts = NetworkOptions(handle=handle, memory_limit=0.7 * xp.cuda.Device().mem_info[0])
+        out = contract('wKkP, kPp, KPr -> wkpKr', fullLpLconjx, cgto_slice.conj(), cgto_slice, options=network_opts)
+        del full_Lx, full_Lconjx, fullLpLconjx, cgto_slice
+        outvhs += out.reshape(nwalkers, nk * nbsf, nk * nbsf)
+        del out
+    xp._default_memory_pool.free_all_blocks()
+    return outvhs
 
 Phaseless = {"cholesky": PhaselessKptChol, "isdf": PhaselessKptISDF, "cholchunked": PhaselessKptCholChunked}

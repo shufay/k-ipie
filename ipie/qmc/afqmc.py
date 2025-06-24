@@ -21,6 +21,7 @@ import abc
 import json
 import time
 import uuid
+import math
 from typing import Dict, Optional, Tuple
 
 
@@ -42,6 +43,7 @@ from ipie.utils.mpi import MPIHandler
 from ipie.walkers.base_walkers import WalkerAccumulator
 from ipie.walkers.pop_controller import PopController
 from ipie.walkers.walkers_dispatch import get_initial_walker, UHFWalkersTrial
+from ipie.trial_wavefunction.particle_hole import ParticleHole
 
 
 class AFQMCBase(metaclass=abc.ABCMeta):
@@ -56,6 +58,7 @@ class AFQMCBase(metaclass=abc.ABCMeta):
         propagator,
         mpi_handler,
         params: QMCParams,
+        eq_propagator = None,
         verbose: int = 0,
     ):
         self.system = system
@@ -63,6 +66,7 @@ class AFQMCBase(metaclass=abc.ABCMeta):
         self.trial = trial
         self.walkers = walkers
         self.propagator = propagator
+        self.eq_propagator = eq_propagator
         self.mpi_handler = mpi_handler  # mpi_handler should be passed into here
         self.shared_comm = self.mpi_handler.shared_comm
         self.verbose = verbose
@@ -106,7 +110,8 @@ class AFQMCBase(metaclass=abc.ABCMeta):
                     )
             self.propagator.cast_to_cupy(self.verbose and comm.rank == 0)
             self.hamiltonian.cast_to_cupy(self.verbose and comm.rank == 0)
-            self.trial.cast_to_cupy(self.verbose and comm.rank == 0)
+            if not isinstance(self.trial, ParticleHole):
+                self.trial.cast_to_cupy(self.verbose and comm.rank == 0)
             self.walkers.cast_to_cupy(self.verbose and comm.rank == 0)
 
     def get_env_info(self):
@@ -288,10 +293,11 @@ class AFQMC(AFQMCBase):
         propagator,
         mpi_handler,
         params: QMCParams,
+        eq_propagator = None,
         verbose: int = 0,
     ):
         super().__init__(
-            system, hamiltonian, trial, walkers, propagator, mpi_handler, params, verbose
+            system, hamiltonian, trial, walkers, propagator, mpi_handler, params, eq_propagator, verbose
         )
 
     @staticmethod
@@ -307,7 +313,14 @@ class AFQMC(AFQMCBase):
         num_blocks: int = 100,
         timestep: float = 0.005,
         stabilize_freq=5,
+        eq_stabilize_freq=2,
         pop_control_freq=5,
+        eq_pop_control_freq=2,
+        eq_timestep = None,
+        eq_num_steps_per_block = None,
+        num_eq_blocks: int = 50,
+        ene_bound_const: float = 2.0,
+        fb_bound: float = 1.0,
         verbose=True,
         mpi_handler=None,
     ) -> "AFQMC":
@@ -353,8 +366,15 @@ class AFQMC(AFQMCBase):
             num_steps_per_block=num_steps_per_block,
             timestep=timestep,
             num_stblz=stabilize_freq,
+            num_eq_stblz=eq_stabilize_freq,
             pop_control_freq=pop_control_freq,
+            eq_pop_control_freq=eq_pop_control_freq,
             rng_seed=seed,
+            eq_timestep=eq_timestep,
+            eq_num_steps_per_block=eq_num_steps_per_block,
+            num_eq_blocks=num_eq_blocks,
+            fb_bound=fb_bound,
+            ene_bound_const=ene_bound_const
         )
         # 2. Calculation objects.
         system = Generic(num_elec)
@@ -380,8 +400,13 @@ class AFQMC(AFQMCBase):
                 trial_wavefunction
             )  # any intermediates that require information from trial_wavefunction
         # TODO: this is a factory not a class
-        propagator = Propagator[type(hamiltonian)](params.timestep)
+        propagator = Propagator[type(hamiltonian)](params.timestep, params.ene_bound_const, params.fb_bound)
         propagator.build(hamiltonian, trial_wavefunction, walkers, mpi_handler)
+        if not math.isclose(params.timestep, params.eq_timestep, rel_tol=1e-8):
+            eq_propagator = Propagator[type(hamiltonian)](params.eq_timestep, params.ene_bound_const, params.fb_bound)
+            eq_propagator.build(hamiltonian, trial_wavefunction, walkers, mpi_handler)
+        else:
+            eq_propagator = propagator
         return AFQMC(
             system,
             hamiltonian,
@@ -390,6 +415,7 @@ class AFQMC(AFQMCBase):
             propagator,
             mpi_handler,
             params,
+            eq_propagator,
             verbose=(verbose and comm.rank == 0),
         )
 
@@ -512,6 +538,7 @@ class AFQMC(AFQMCBase):
         walkers=None,
         estimator_filename=None,
         verbose=True,
+        discard_weights_aftereq=False,
         additional_estimators: Optional[Dict[str, EstimatorBase]] = None,
     ):
         """Perform AFQMC simulation on state object using open-ended random walk.
@@ -537,6 +564,7 @@ class AFQMC(AFQMCBase):
             self.params.num_walkers,
             self.params.num_steps_per_block,
             self.mpi_handler,
+            pop_control_method="stochastic_reconfiguration",
             verbose=self.verbose,
         )
 
@@ -548,9 +576,10 @@ class AFQMC(AFQMCBase):
         # TODO: This magic value of 2 is pretty much never controlled on input.
         # Moreover I'm not convinced having a two stage shift update actually
         # matters at all.
-        num_eqlb_steps = 2.0 / self.params.timestep
+        # num_eqlb_steps = 2.0 / self.params.timestep
+        num_eqlb_steps = self.params.num_eq_blocks * self.params.eq_num_steps_per_block
 
-        total_steps = self.params.num_steps_per_block * self.params.num_blocks
+        total_steps = self.params.num_steps_per_block * self.params.num_blocks + num_eqlb_steps
 
         synchronize()
         comm = self.mpi_handler.comm
@@ -559,24 +588,43 @@ class AFQMC(AFQMCBase):
         for step in range(1, total_steps + 1):
             synchronize()
             start_step = time.time()
-            if step % self.params.num_stblz == 0:
-                start = time.time()
-                self.walkers.orthogonalise()
-                synchronize()
-                self.tortho += time.time() - start
+            if step <= num_eqlb_steps:
+                if step % self.params.num_eq_stblz == 0:
+                    start = time.time()
+                    self.walkers.orthogonalise()
+                    synchronize()
+                    self.tortho += time.time() - start
+            else:
+                if step % self.params.num_stblz == 0:
+                    start = time.time()
+                    self.walkers.orthogonalise()
+                    synchronize()
+                    self.tortho += time.time() - start
             start = time.time()
-            self.propagator.propagate_walkers(self.walkers, self.hamiltonian, self.trial, eshift)
-
-            self.tprop_fbias = self.propagator.timer.tfbias
-            self.tprop_ovlp = self.propagator.timer.tovlp
-            self.tprop_update = self.propagator.timer.tupdate
-            self.tprop_gf = self.propagator.timer.tgf
-            self.tprop_vhs = self.propagator.timer.tvhs
-            self.tprop_gemm = self.propagator.timer.tgemm
+            if step <= num_eqlb_steps:
+                self.eq_propagator.propagate_walkers(self.walkers, self.hamiltonian, self.trial, eshift)
+                self.tprop_fbias = self.eq_propagator.timer.tfbias
+                self.tprop_ovlp = self.eq_propagator.timer.tovlp
+                self.tprop_update = self.eq_propagator.timer.tupdate
+                self.tprop_gf = self.eq_propagator.timer.tgf
+                self.tprop_vhs = self.eq_propagator.timer.tvhs
+                self.tprop_gemm = self.eq_propagator.timer.tgemm
+            else:
+                if discard_weights_aftereq:
+                    if step == num_eqlb_steps + 1:
+                        self.walkers.weight.fill(1.)
+                self.propagator.propagate_walkers(self.walkers, self.hamiltonian, self.trial, eshift)
+                self.tprop_fbias = self.propagator.timer.tfbias
+                self.tprop_ovlp = self.propagator.timer.tovlp
+                self.tprop_update = self.propagator.timer.tupdate
+                self.tprop_gf = self.propagator.timer.tgf
+                self.tprop_vhs = self.propagator.timer.tvhs
+                self.tprop_gemm = self.propagator.timer.tgemm
 
             start_clip = time.time()
             if step > 1:
                 wbound = self.pcontrol.total_weight * 0.10
+                xp.nan_to_num(self.walkers.weight, copy=False)
                 xp.clip(
                     self.walkers.weight, a_min=-wbound, a_max=wbound, out=self.walkers.weight
                 )  # in-place clipping
@@ -590,15 +638,26 @@ class AFQMC(AFQMCBase):
             self.tprop_barrier += time.time() - start_barrier
 
             self.tprop += time.time() - start
-            if step % self.params.pop_control_freq == 0:
-                start = time.time()
-                self.pcontrol.pop_control(self.walkers, comm)
-                synchronize()
-                self.tpopc += time.time() - start
-                self.tpopc_send = self.pcontrol.timer.send_time
-                self.tpopc_recv = self.pcontrol.timer.recv_time
-                self.tpopc_comm = self.pcontrol.timer.communication_time
-                self.tpopc_non_comm = self.pcontrol.timer.non_communication_time
+            if step <= num_eqlb_steps:
+                if step % self.params.eq_pop_control_freq == 0:
+                    start = time.time()
+                    self.pcontrol.pop_control(self.walkers, comm)
+                    synchronize()
+                    self.tpopc += time.time() - start
+                    self.tpopc_send = self.pcontrol.timer.send_time
+                    self.tpopc_recv = self.pcontrol.timer.recv_time
+                    self.tpopc_comm = self.pcontrol.timer.communication_time
+                    self.tpopc_non_comm = self.pcontrol.timer.non_communication_time
+            else:
+                if step % self.params.pop_control_freq == 0:
+                    start = time.time()
+                    self.pcontrol.pop_control(self.walkers, comm)
+                    synchronize()
+                    self.tpopc += time.time() - start
+                    self.tpopc_send = self.pcontrol.timer.send_time
+                    self.tpopc_recv = self.pcontrol.timer.recv_time
+                    self.tpopc_comm = self.pcontrol.timer.communication_time
+                    self.tpopc_non_comm = self.pcontrol.timer.non_communication_time
 
             # accumulate weight, hybrid energy etc. across block
             start = time.time()
@@ -607,20 +666,36 @@ class AFQMC(AFQMCBase):
             self.testim += time.time() - start  # we dump this time into estimator
             # calculate estimators
             start = time.time()
-            if step % self.params.num_steps_per_block == 0:
-                self.estimators.compute_estimators(
-                    self.system, self.hamiltonian, self.trial, self.walkers
-                )
-                self.estimators.print_block(
-                    comm, step // self.params.num_steps_per_block, self.accumulators
-                )
-                self.accumulators.zero()
+            if step > num_eqlb_steps:
+                if step % self.params.num_steps_per_block == 0:
+                    self.estimators.compute_estimators(
+                        self.system, self.hamiltonian, self.trial, self.walkers
+                    )
+                    self.estimators.print_block(
+                        comm, (step - num_eqlb_steps)// self.params.num_steps_per_block , self.accumulators
+                    )
+                    self.accumulators.zero()
+            else:
+                if step % self.params.eq_num_steps_per_block == 0:
+                    self.estimators.compute_estimators(
+                        self.system, self.hamiltonian, self.trial, self.walkers
+                    )
+                    self.estimators.print_block(
+                        comm, step // self.params.eq_num_steps_per_block, self.accumulators
+                    )
+                    self.accumulators.zero()
             synchronize()
             self.testim += time.time() - start
 
             # restart write features disabled
-            # if self.walkers.write_restart and step % self.walkers.write_freq == 0:
-            #     self.walkers.write_walkers_batch(comm)
+            if self.walkers.write_restart:
+                if self.walkers.write_freq is not None:
+                    if step % self.walkers.write_freq == 0:
+                        self.walkers.write_walkers_batch(comm)
+                else:
+                    assert self.walkers.write_time is not None
+                    if step == self.walkers.write_time:
+                        self.walkers.write_walkers_batch(comm)
 
             if step < num_eqlb_steps:
                 eshift = self.accumulators.eshift
