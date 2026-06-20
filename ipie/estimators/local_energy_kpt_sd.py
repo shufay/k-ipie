@@ -1,32 +1,42 @@
-# from line_profiler import LineProfiler
-from math import ceil, sqrt
+# Copyright 2022 The ipie Developers. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Authors: Jinghong Zhang <jinghongzhang@fas.harvard.edu>
+#
+#
+
+from math import sqrt
 
 import numpy
 from numba import jit
-
-from ipie.estimators.local_energy import local_energy_G
-from ipie.estimators.kernels import exchange_reduction
 from ipie.utils.backend import arraylib as xp
-from ipie.utils.backend import synchronize
-from ipie.config import config
-from cuquantum.bindings import cutensornet
-from cuquantum.tensornet import NetworkOptions, contract
-from ipie.utils.contract_gf_cgto import contract_gf_cgto12_kpq_k, contract_gf_cgto12_k_kpq, slice_gf_k_kpq_given_q, slice_gf_kpq_k_given_q
 
 from ipie.systems.generic import Generic
-from ipie.hamiltonians.kpt_hamiltonian import KptComplexChol, KptComplexCholSymm, KptISDF
+from ipie.hamiltonians.kpt_hamiltonian import KptComplexChol, KptComplexCholSymm
 from ipie.walkers.uhf_walkers import UHFWalkers
 from ipie.trial_wavefunction.single_det_kpt import KptSingleDet
-
 
 # from line_profiler import profile
 
 import plum
+
 # Note specialisations occur to because:
 # 1. Numba does not allow for mixing types without a warning so need to split
 # real and complex components apart when rchol is real. Green's function is
 # complex in general.
 # Optimize for case when wavefunction is RHF (factor of 2 saving)
+
 
 @jit(nopython=True, fastmath=True)
 def kpt_chol_ecoul_kernel_rhf(rchola, Ghalfa_batch, kpq_mat, mq_vec):
@@ -64,13 +74,16 @@ def kpt_chol_ecoul_kernel_rhf(rchola, Ghalfa_batch, kpq_mat, mq_vec):
             i_mq = mq_vec[iq]
             for iw in range(nwalkers):
                 for g in range(naux):
-                    X[iw, g, iq] += numpy.trace(dot(rchola[g, ik, :, iq, :], GhalfaT[iw, ik_pq, :, ik, :]))
+                    X[iw, g, iq] += numpy.trace(
+                        dot(rchola[g, ik, :, iq, :], GhalfaT[iw, ik_pq, :, ik, :])
+                    )
 
     for iw in range(nwalkers):
         for q in range(nk):
             i_mq = mq_vec[q]
-            ecoul[iw] += 2. * dot(X[iw, :, q], X[iw, :, i_mq])
+            ecoul[iw] += 2.0 * dot(X[iw, :, q], X[iw, :, i_mq])
     return ecoul / nk
+
 
 @jit(nopython=True, fastmath=True)
 def kpt_chol_exx_kernel(rchola, Ghalfa_batch, kpq_mat, mq_vec):
@@ -116,10 +129,13 @@ def kpt_chol_exx_kernel(rchola, Ghalfa_batch, kpq_mat, mq_vec):
                 for n in range(nwalkers):
                     for g in range(naux):
                         T1[n, g] = dot(rchola[g, ik, :, iq, :], GhalfaT[n, ik_pq, :, ikpr_pq, :])
-                        T2[n, g] = dot(rchola[g, ikpr_pq, :, i_mq, :], GhalfaT[n, ikprime, :, ik, :])
+                        T2[n, g] = dot(
+                            rchola[g, ikpr_pq, :, i_mq, :], GhalfaT[n, ikprime, :, ik, :]
+                        )
                         exx[n] += -numpy.trace(dot(T1[n, g], T2[n, g]))
 
     return 0.5 * exx / nk
+
 
 @jit(nopython=True, fastmath=True)
 def kpt_chol_ecoul_kernel_uhf(rchola, rcholb, Ghalfa_batch, Ghalfb_batch, kpq_mat, mq_vec):
@@ -160,13 +176,16 @@ def kpt_chol_ecoul_kernel_uhf(rchola, rcholb, Ghalfa_batch, Ghalfb_batch, kpq_ma
             i_mq = mq_vec[iq]
             for iw in range(nwalkers):
                 for g in range(naux):
-                    X[iw, g, iq] += numpy.trace(dot(rchola[g, ik, :, iq, :], GhalfaT[iw, ik_pq, :, ik, :])) + numpy.trace(dot(rcholb[g, ik, :, iq, :], GhalfbT[iw, ik_pq, :, ik, :]))
+                    X[iw, g, iq] += numpy.trace(
+                        dot(rchola[g, ik, :, iq, :], GhalfaT[iw, ik_pq, :, ik, :])
+                    ) + numpy.trace(dot(rcholb[g, ik, :, iq, :], GhalfbT[iw, ik_pq, :, ik, :]))
 
     for iw in range(nwalkers):
         for q in range(nk):
             i_mq = mq_vec[q]
             ecoul[iw] += dot(X[iw, :, q], X[iw, :, i_mq])
-    return 0.5 * ecoul  / nk
+    return 0.5 * ecoul / nk
+
 
 @jit(nopython=True, fastmath=True)
 def kpt_symmchol_ecoul_kernel_rhf(rchola, rcholbara, Ghalfa, GhalfaT, kpq_mat, Sset, Qplus):
@@ -191,7 +210,6 @@ def kpt_symmchol_ecoul_kernel_rhf(rchola, rcholbara, Ghalfa, GhalfaT, kpq_mat, S
     # sort out cupy later
     zeros = numpy.zeros
     dot = numpy.dot
-    multiply = numpy.multiply
     nwalkers = Ghalfa.shape[2]
 
     # shape of rchola: (nq, nk, nocc, naux, nbsf) (q, k, gamma, i, p)
@@ -212,12 +230,12 @@ def kpt_symmchol_ecoul_kernel_rhf(rchola, rcholbara, Ghalfa, GhalfaT, kpq_mat, S
         Xbarq = Xbar[iq]
         for ik in range(nk):
             ik_pq = kpq_mat[iq_real, ik]
-            La = rchola[iq, ik].reshape(naux,nocc*nbsf)
-            Lbara = rcholbara[iq, ik].reshape(naux,nocc*nbsf)
+            La = rchola[iq, ik].reshape(naux, nocc * nbsf)
+            Lbara = rcholbara[iq, ik].reshape(naux, nocc * nbsf)
             for iw in range(nwalkers):
-                Ghalfa_k_kpq = Ghalfa[ik, ik_pq, iw].reshape(nocc*nbsf)
-                GhalfTa_k_kpq = GhalfaT[ik, ik_pq, iw].reshape(nocc*nbsf)
-                Xq[iw] += 2.0 * La @ Ghalfa_k_kpq 
+                Ghalfa_k_kpq = Ghalfa[ik, ik_pq, iw].reshape(nocc * nbsf)
+                GhalfTa_k_kpq = GhalfaT[ik, ik_pq, iw].reshape(nocc * nbsf)
+                Xq[iw] += 2.0 * La @ Ghalfa_k_kpq
                 Xbarq[iw] += 2.0 * Lbara @ GhalfTa_k_kpq
 
     for iq in range(len(Sset), len(Sset) + len(Qplus)):
@@ -226,11 +244,11 @@ def kpt_symmchol_ecoul_kernel_rhf(rchola, rcholbara, Ghalfa, GhalfaT, kpq_mat, S
         Xbarq = Xbar[iq]
         for ik in range(nk):
             ik_pq = kpq_mat[iq_real, ik]
-            La = rchola[iq, ik].reshape(naux,nocc*nbsf)
-            Lbara = rcholbara[iq, ik].reshape(naux,nocc*nbsf)
+            La = rchola[iq, ik].reshape(naux, nocc * nbsf)
+            Lbara = rcholbara[iq, ik].reshape(naux, nocc * nbsf)
             for iw in range(nwalkers):
-                Ghalfa_k_kpq = Ghalfa[ik, ik_pq, iw].reshape(nocc*nbsf)
-                GhalfTa_k_kpq = GhalfaT[ik, ik_pq, iw].reshape(nocc*nbsf)
+                Ghalfa_k_kpq = Ghalfa[ik, ik_pq, iw].reshape(nocc * nbsf)
+                GhalfTa_k_kpq = GhalfaT[ik, ik_pq, iw].reshape(nocc * nbsf)
                 Xq[iw] += 2.0 * sqrt(2) * La @ Ghalfa_k_kpq
                 Xbarq[iw] += 2.0 * sqrt(2) * Lbara @ GhalfTa_k_kpq
 
@@ -242,7 +260,8 @@ def kpt_symmchol_ecoul_kernel_rhf(rchola, rcholbara, Ghalfa, GhalfaT, kpq_mat, S
         ecoul[iw] = dot(X[iw], Xbar[iw])
     return 0.5 * ecoul / nk
 
-@jit(nopython=True, fastmath=True) #, parallel=True
+
+@jit(nopython=True, fastmath=True)  # , parallel=True
 def kpt_symmchol_exx_kernel_lowmem(rchola, rcholbara, Ghalfa, GhalfaT, kpq_mat, Sset, Qplus):
     """Compute coulomb contribution for complex rchol with RHF trial.
 
@@ -266,7 +285,7 @@ def kpt_symmchol_exx_kernel_lowmem(rchola, rcholbara, Ghalfa, GhalfaT, kpq_mat, 
     zeros = numpy.zeros
     nwalkers = Ghalfa.shape[2]
 
-    # shape of rchola: (nq, nk, naux, nocc, nbsf) 
+    # shape of rchola: (nq, nk, naux, nocc, nbsf)
     # shape of Ghalf: (nk, nk, nw, nocc, nbsf)
     naux = rchola.shape[2]
     nocc = rchola.shape[3]
@@ -274,14 +293,14 @@ def kpt_symmchol_exx_kernel_lowmem(rchola, rcholbara, Ghalfa, GhalfaT, kpq_mat, 
     exx = zeros(nwalkers, dtype=numpy.complex128)
 
     for iq in range(len(Sset)):
-        iq_real = Sset[iq]        
+        iq_real = Sset[iq]
         for ik in range(nk):
             ik_pq = kpq_mat[iq_real, ik]
             for ikprime in range(nk):
                 ikpr_pq = kpq_mat[iq_real, ikprime]
                 for iw in range(nwalkers):
                     Ghalf_kpq_kprpq = GhalfaT[ik_pq, ikpr_pq, iw]
-                    Ghalf_k_kp = Ghalfa[ik,ikprime, iw]
+                    Ghalf_k_kp = Ghalfa[ik, ikprime, iw]
                     for g in range(naux):
                         Lkqg = rchola[iq, ik, :, g].transpose(1, 0, 2).copy()
                         Lbarkpqg = rcholbara[iq, ikprime, :, g].transpose(1, 0, 2).copy()
@@ -307,10 +326,10 @@ def kpt_symmchol_exx_kernel_lowmem(rchola, rcholbara, Ghalfa, GhalfaT, kpq_mat, 
                         T2 = Ghalf_k_kp @ Lbarkpq[g]
                         for i in range(nocc):
                             for j in range(nocc):
-                                exx[iw] -= 2. * T1[i, j] * T2[i, j]
+                                exx[iw] -= 2.0 * T1[i, j] * T2[i, j]
 
 
-@jit(nopython=True, fastmath=True) #, parallel=True
+@jit(nopython=True, fastmath=True)  # , parallel=True
 def kpt_symmchol_exx_kernel(rchola, rcholbara, Ghalfa, GhalfaT, kpq_mat, Sset, Qplus):
     """Compute coulomb contribution for complex rchol with RHF trial.
 
@@ -350,9 +369,9 @@ def kpt_symmchol_exx_kernel(rchola, rcholbara, Ghalfa, GhalfaT, kpq_mat, Sset, Q
                 Lkq = rchola[iq, ik].reshape(naux * nocc, -1)
                 Lbarkpq = rcholbara[iq, ikprime].reshape(-1, naux * nocc)
                 Ghalf_kpq_kprpq = GhalfaT[ik_pq, ikpr_pq].reshape(-1, nocc * nwalkers)
-                Ghalf_k_kp = Ghalfa[ik,ikprime].reshape(nwalkers * nocc, -1)
-                T1 = Lkq @ Ghalf_kpq_kprpq # (naux * nocc, nocc * nwalkers)
-                T2 = Ghalf_k_kp @ Lbarkpq # (nwalkers * nocc, naux * nocc)
+                Ghalf_k_kp = Ghalfa[ik, ikprime].reshape(nwalkers * nocc, -1)
+                T1 = Lkq @ Ghalf_kpq_kprpq  # (naux * nocc, nocc * nwalkers)
+                T2 = Ghalf_k_kp @ Lbarkpq  # (nwalkers * nocc, naux * nocc)
                 T1 = T1.reshape(naux * nocc * nocc, nwalkers).T.copy()
                 T2 = T2.reshape(nwalkers, naux * nocc * nocc).copy()
                 for iw in range(nwalkers):
@@ -367,18 +386,21 @@ def kpt_symmchol_exx_kernel(rchola, rcholbara, Ghalfa, GhalfaT, kpq_mat, Sset, Q
                 Lkq = rchola[iq, ik].reshape(naux * nocc, -1)
                 Lbarkpq = rcholbara[iq, ikprime].reshape(-1, naux * nocc)
                 Ghalf_kpq_kprpq = GhalfaT[ik_pq, ikpr_pq].reshape(-1, nocc * nwalkers)
-                Ghalf_k_kp = Ghalfa[ik,ikprime].reshape(nwalkers * nocc, -1)
-                T1 = Lkq @ Ghalf_kpq_kprpq # (naux * nocc, nocc * nwalkers)
-                T2 = Ghalf_k_kp @ Lbarkpq # (nwalkers * nocc, naux * nocc)
+                Ghalf_k_kp = Ghalfa[ik, ikprime].reshape(nwalkers * nocc, -1)
+                T1 = Lkq @ Ghalf_kpq_kprpq  # (naux * nocc, nocc * nwalkers)
+                T2 = Ghalf_k_kp @ Lbarkpq  # (nwalkers * nocc, naux * nocc)
                 T1 = T1.reshape(naux * nocc * nocc, nwalkers).T.copy()
                 T2 = T2.reshape(nwalkers, naux * nocc * nocc).copy()
                 for iw in range(nwalkers):
-                    exx[iw] += - 2. * T1[iw] @ T2[iw]
+                    exx[iw] += -2.0 * T1[iw] @ T2[iw]
 
     return 0.5 * exx / nk
 
+
 @jit(nopython=True, fastmath=True)
-def kpt_symmchol_ecoul_kernel_uhf(rchola, rcholb, rcholbara, rcholbarb, Ghalfa, Ghalfb, GhalfaT, GhalfbT, kpq_mat, Sset, Qplus):
+def kpt_symmchol_ecoul_kernel_uhf(
+    rchola, rcholb, rcholbara, rcholbarb, Ghalfa, Ghalfb, GhalfaT, GhalfbT, kpq_mat, Sset, Qplus
+):
     """Compute coulomb contribution for real rchol with UHF trial.
 
     Parameters
@@ -400,7 +422,6 @@ def kpt_symmchol_ecoul_kernel_uhf(rchola, rcholb, rcholbara, rcholbarb, Ghalfa, 
     # sort out cupy later
     zeros = numpy.zeros
     dot = numpy.dot
-    multiply = numpy.multiply
     nwalkers = Ghalfa.shape[2]
 
     # shape of rchola: (nq, nk, nocc, naux, nbsf) (q, k, i, gamma, p)
@@ -424,16 +445,16 @@ def kpt_symmchol_ecoul_kernel_uhf(rchola, rcholb, rcholbara, rcholbarb, Ghalfa, 
         Xbarq = Xbar[iq]
         for ik in range(nk):
             ik_pq = kpq_mat[iq_real, ik]
-            La = rchola[iq, ik].reshape(naux,nocca*nbsf)
-            Lb = rcholb[iq, ik].reshape(naux,noccb*nbsf)
-            Lbara = rcholbara[iq, ik].reshape(naux,nocca*nbsf)
-            Lbarb = rcholbarb[iq, ik].reshape(naux,noccb*nbsf)
+            La = rchola[iq, ik].reshape(naux, nocc * nbsf)
+            Lb = rcholb[iq, ik].reshape(naux, nocc * nbsf)
+            Lbara = rcholbara[iq, ik].reshape(naux, nocc * nbsf)
+            Lbarb = rcholbarb[iq, ik].reshape(naux, nocc * nbsf)
             for iw in range(nwalkers):
-                Ghalfa_k_kpq = Ghalfa[ik, ik_pq, iw].reshape(nocca*nbsf)
-                GhalfTa_k_kpq = GhalfaT[ik, ik_pq, iw].reshape(nocca*nbsf)
-                Ghalfb_k_kpq = Ghalfb[ik, ik_pq, iw].reshape(noccb*nbsf)
-                GhalfTb_k_kpq = GhalfbT[ik, ik_pq, iw].reshape(noccb*nbsf)
-                Xq[iw] += La @ Ghalfa_k_kpq + Lb @ Ghalfb_k_kpq 
+                Ghalfa_k_kpq = Ghalfa[ik, ik_pq, iw].reshape(nocc * nbsf)
+                GhalfTa_k_kpq = GhalfaT[ik, ik_pq, iw].reshape(nocc * nbsf)
+                Ghalfb_k_kpq = Ghalfb[ik, ik_pq, iw].reshape(nocc * nbsf)
+                GhalfTb_k_kpq = GhalfbT[ik, ik_pq, iw].reshape(nocc * nbsf)
+                Xq[iw] += La @ Ghalfa_k_kpq + Lb @ Ghalfb_k_kpq
                 Xbarq[iw] += Lbara @ GhalfTa_k_kpq + Lbarb @ GhalfTb_k_kpq
 
     for iq in range(len(Sset), len(Sset) + len(Qplus)):
@@ -442,15 +463,15 @@ def kpt_symmchol_ecoul_kernel_uhf(rchola, rcholb, rcholbara, rcholbarb, Ghalfa, 
         Xbarq = Xbar[iq]
         for ik in range(nk):
             ik_pq = kpq_mat[iq_real, ik]
-            La = rchola[iq, ik].reshape(naux,nocca*nbsf)
-            Lb = rcholb[iq, ik].reshape(naux,noccb*nbsf)
-            Lbara = rcholbara[iq, ik].reshape(naux,nocca*nbsf)
-            Lbarb = rcholbarb[iq, ik].reshape(naux,noccb*nbsf)
+            La = rchola[iq, ik].reshape(naux, nocc * nbsf)
+            Lb = rcholb[iq, ik].reshape(naux, nocc * nbsf)
+            Lbara = rcholbara[iq, ik].reshape(naux, nocc * nbsf)
+            Lbarb = rcholbarb[iq, ik].reshape(naux, nocc * nbsf)
             for iw in range(nwalkers):
-                Ghalfa_k_kpq = Ghalfa[ik, ik_pq, iw].reshape(nocca*nbsf)
-                GhalfTa_k_kpq = GhalfaT[ik, ik_pq, iw].reshape(nocca*nbsf)
-                Ghalfb_k_kpq = Ghalfb[ik, ik_pq, iw].reshape(noccb*nbsf)
-                GhalfTb_k_kpq = GhalfbT[ik, ik_pq, iw].reshape(noccb*nbsf)
+                Ghalfa_k_kpq = Ghalfa[ik, ik_pq, iw].reshape(nocc * nbsf)
+                GhalfTa_k_kpq = GhalfaT[ik, ik_pq, iw].reshape(nocc * nbsf)
+                Ghalfb_k_kpq = Ghalfb[ik, ik_pq, iw].reshape(nocc * nbsf)
+                GhalfTb_k_kpq = GhalfbT[ik, ik_pq, iw].reshape(nocc * nbsf)
                 Xq[iw] += sqrt(2) * (La @ Ghalfa_k_kpq + Lb @ Ghalfb_k_kpq)
                 Xbarq[iw] += sqrt(2) * (Lbara @ GhalfTa_k_kpq + Lbarb @ GhalfTb_k_kpq)
 
@@ -462,161 +483,6 @@ def kpt_symmchol_ecoul_kernel_uhf(rchola, rcholb, rcholbara, rcholbarb, Ghalfa, 
         ecoul[iw] = dot(X[iw], Xbar[iw])
     return 0.5 * ecoul / nk
 
-def kpt_isdf_ecoul_kernel_gpu(MPQ, halfrot_cgtoa, halfrot_cgtob, cgto, Ghalfa_batch, Ghalfb_batch, kpq_mat, Sset, Qplus):
-    nk = cgto.shape[0]
-    nwalkers = Ghalfa_batch.shape[0]
-    ecoul = xp.zeros(nwalkers, dtype=numpy.complex128)
-    handle = cutensornet.create()
-    network_opts = NetworkOptions(handle=handle)
-    for iq in range(len(Sset)):
-        iq_real = Sset[iq]
-        MPQ_iq = MPQ[iq]
-        ikpq = kpq_mat[iq_real]
-        cgto_kpq = cgto[ikpq]
-        rcgtoa_kpq = halfrot_cgtoa[ikpq]
-        rcgtob_kpq = halfrot_cgtob[ikpq]
-        ga_k_kpq = slice_gf_k_kpq_given_q(Ghalfa_batch, iq_real, kpq_mat)
-        gb_k_kpq = slice_gf_k_kpq_given_q(Ghalfb_batch, iq_real, kpq_mat)
-        v1_wP = contract_gf_cgto12_k_kpq(ga_k_kpq, halfrot_cgtoa, cgto_kpq, iq_real, network_opts) + contract_gf_cgto12_k_kpq(gb_k_kpq, halfrot_cgtob, cgto_kpq, iq_real, network_opts)
-        del ga_k_kpq
-        del gb_k_kpq
-        ga_kpq_k = slice_gf_kpq_k_given_q(Ghalfa_batch, iq_real, kpq_mat)
-        gb_kpq_k = slice_gf_kpq_k_given_q(Ghalfb_batch, iq_real, kpq_mat)
-        # v2_wP = contract_gf_cgto12_kpq_k(Ghalfa_batch, halfrot_cgtoa, cgto, iq_real, kpq_mat) + contract_gf_cgto12_kpq_k(Ghalfb_batch, halfrot_cgtob, cgto, iq_real, kpq_mat)
-        v2_wP = contract_gf_cgto12_kpq_k(ga_kpq_k, rcgtoa_kpq, cgto, iq_real, network_opts) + contract_gf_cgto12_kpq_k(gb_kpq_k, rcgtob_kpq, cgto, iq_real, network_opts)
-        del ga_kpq_k
-        del gb_kpq_k
-        ecoul += xp.sum((v1_wP @ MPQ_iq) * v2_wP, axis=1)
-
-    for iq in range(len(Sset), len(Sset) + len(Qplus)):
-        iq_real = Qplus[iq - len(Sset)]
-        MPQ_iq = MPQ[iq]
-        ikpq = kpq_mat[iq_real]
-        cgto_kpq = cgto[ikpq]
-        rcgtoa_kpq = halfrot_cgtoa[ikpq]
-        rcgtob_kpq = halfrot_cgtob[ikpq]
-        ga_k_kpq = slice_gf_k_kpq_given_q(Ghalfa_batch, iq_real, kpq_mat)
-        gb_k_kpq = slice_gf_k_kpq_given_q(Ghalfb_batch, iq_real, kpq_mat)
-        v1_wP = contract_gf_cgto12_k_kpq(ga_k_kpq, halfrot_cgtoa, cgto_kpq, iq_real, network_opts) + contract_gf_cgto12_k_kpq(gb_k_kpq, halfrot_cgtob, cgto_kpq, iq_real, network_opts)
-        del ga_k_kpq
-        del gb_k_kpq
-        ga_kpq_k = slice_gf_kpq_k_given_q(Ghalfa_batch, iq_real, kpq_mat)
-        gb_kpq_k = slice_gf_kpq_k_given_q(Ghalfb_batch, iq_real, kpq_mat)
-        v2_wP = contract_gf_cgto12_kpq_k(ga_kpq_k, rcgtoa_kpq, cgto, iq_real, network_opts) + contract_gf_cgto12_kpq_k(gb_kpq_k, rcgtob_kpq, cgto, iq_real, network_opts)
-        del ga_kpq_k
-        del gb_kpq_k
-        ecoul += 2. * xp.sum((v1_wP @ MPQ_iq) * v2_wP, axis=1)
-    cutensornet.destroy(handle)
-    return 0.5 * ecoul / nk
-
-def kpt_isdf_ecoul_rhf_kernel_gpu(MPQ, halfrot_cgtoa, cgto, Ghalfa_batch, kpq_mat, Sset, Qplus):
-    nk = cgto.shape[0]
-    nwalkers = Ghalfa_batch.shape[0]
-    ecoul = xp.zeros(nwalkers, dtype=numpy.complex128)
-    handle = cutensornet.create()
-    network_opts = NetworkOptions(handle=handle)
-    for iq in range(len(Sset)):
-        iq_real = Sset[iq]
-        MPQ_iq = MPQ[iq]
-        ikpq = kpq_mat[iq_real]
-        cgto_kpq = cgto[ikpq]
-        rcgtoa_kpq = halfrot_cgtoa[ikpq]
-        ga_k_kpq = slice_gf_k_kpq_given_q(Ghalfa_batch, iq_real, kpq_mat)
-        v1_wP = contract_gf_cgto12_k_kpq(ga_k_kpq, halfrot_cgtoa, cgto_kpq, iq_real, network_opts)
-        del ga_k_kpq
-        ga_kpq_k = slice_gf_kpq_k_given_q(Ghalfa_batch, iq_real, kpq_mat)
-        v2_wP = contract_gf_cgto12_kpq_k(ga_kpq_k, rcgtoa_kpq, cgto, iq_real, network_opts)
-        del ga_kpq_k
-        ecoul += xp.sum((v1_wP @ MPQ_iq) * v2_wP, axis=1)
-
-    for iq in range(len(Sset), len(Sset) + len(Qplus)):
-        iq_real = Qplus[iq - len(Sset)]
-        MPQ_iq = MPQ[iq]
-        ikpq = kpq_mat[iq_real]
-        cgto_kpq = cgto[ikpq]
-        rcgtoa_kpq = halfrot_cgtoa[ikpq]
-        ga_k_kpq = slice_gf_k_kpq_given_q(Ghalfa_batch, iq_real, kpq_mat)
-        v1_wP = contract_gf_cgto12_k_kpq(ga_k_kpq, halfrot_cgtoa, cgto_kpq, iq_real, network_opts)
-        del ga_k_kpq
-        ga_kpq_k = slice_gf_kpq_k_given_q(Ghalfa_batch, iq_real, kpq_mat)
-        v2_wP = contract_gf_cgto12_kpq_k(ga_kpq_k, rcgtoa_kpq, cgto, iq_real, network_opts)
-        del ga_kpq_k
-        ecoul += 2. * xp.sum((v1_wP @ MPQ_iq) * v2_wP, axis=1)
-    cutensornet.destroy(handle)
-    return 2. * ecoul / nk
-
-def kpt_isdf_exx_kernel_gpu(MPQ, halfrot_cgtoa, cgto, Ghalfa_batch, kpq_mat, Sset, Qplus):
-    nwalker, nk, nocc, _, nbsf = Ghalfa_batch.shape
-    nisdf = MPQ.shape[-1]
-
-    w_idx = xp.arange(nwalker)[:, None, None, None, None]  # shape (W,1,1,1,1)
-    k_idx = xp.arange(nk)[None, :, None, None, None]  # shape (1,nk,1,1,1)
-    i_idx = xp.arange(nocc)[None, None, :, None, None]  # shape (1,1,nocc,1,1)
-    kprime_idx = xp.arange(nk)[None, None, None, :, None]  # shape (1,1,1,nk,1)
-    p_idx = xp.arange(nbsf)[None, None, None, None, :] # shape (1,1,1,1,nbsf)
-    handle = cutensornet.create()
-    
-
-    exx = xp.zeros(nwalker, dtype=numpy.complex128)
-
-    if nk < 64:
-        intermediate_mem = nwalker * nisdf * nk * nk * nbsf * 6 * 16 / 1024 ** 3
-    else:
-        intermediate_mem = nwalker * nisdf * nk * nbsf * 6 * 16 / 1024 ** 3
-    free_bytes = xp.cuda.Device().mem_info[0]
-    free_gb = free_bytes / 1024**3.0
-    max_mem = .7 * free_gb
-    num_chunks = max(1, ceil(intermediate_mem/ max_mem))
-    chunk_size = ceil(nwalker / num_chunks)
-    nw_left = nwalker
-    for i_chunk in range(num_chunks):
-        if nw_left == 0:
-            break
-        n_chunk = min(nw_left, chunk_size)
-        nw_left -= n_chunk
-        w_sls = xp.arange(nwalker)[i_chunk * chunk_size: i_chunk * chunk_size + n_chunk]
-        Ga_chunk = Ghalfa_batch[w_sls]
-        w_chunk_idx = xp.arange(n_chunk)[:, None, None, None, None]  # shape (W_chunk,1,1,1,1)
-
-        for iq in range(len(Sset)):
-            iq_real = Sset[iq]
-            ikpq = kpq_mat[iq_real]
-            phikr_kpq = cgto[ikpq]
-            phiki_kpq = halfrot_cgtoa[ikpq]
-            kpq_idx = kpq_mat[k_idx, iq_real]
-            kprimepq_idx = kpq_mat[kprime_idx, iq_real]
-            G_kpq_kprimepq_chunk = Ga_chunk[w_chunk_idx, kpq_idx, i_idx, kprimepq_idx, p_idx]
-            MPQ_iq = MPQ[iq]
-            network_opts = NetworkOptions(handle=handle, memory_limit=0.8 * xp.cuda.Device().mem_info[0])
-            exx[w_sls] -= contract('kPi, kPp, PQ, KQj, KQq, wkiKq, wKjkp -> w', halfrot_cgtoa.conj(), phikr_kpq, MPQ_iq, phiki_kpq.conj(), cgto, Ga_chunk, G_kpq_kprimepq_chunk, options=network_opts)
-            xp.cuda.get_current_stream().synchronize()
-            del G_kpq_kprimepq_chunk
-
-        for iq in range(len(Sset), len(Sset) + len(Qplus)):
-            iq_real = Qplus[iq - len(Sset)]
-            ikpq = kpq_mat[iq_real]
-            phikr_kpq = cgto[ikpq]
-            phiki_kpq = halfrot_cgtoa[ikpq]
-            kpq_idx = kpq_mat[k_idx, iq_real]
-            kprimepq_idx = kpq_mat[kprime_idx, iq_real]
-            G_kpq_kprimepq_chunk = Ga_chunk[w_chunk_idx, kpq_idx, i_idx, kprimepq_idx, p_idx]
-            MPQ_iq = MPQ[iq]
-            network_opts = NetworkOptions(handle=handle, memory_limit=0.8 * xp.cuda.Device().mem_info[0])
-            exx[w_sls] -= 2. * contract('kPi, kPp, PQ, KQj, KQq, wkiKq, wKjkp -> w', halfrot_cgtoa.conj(), phikr_kpq, MPQ_iq, phiki_kpq.conj(), cgto, Ga_chunk, G_kpq_kprimepq_chunk, options=network_opts)
-            xp.cuda.get_current_stream().synchronize()
-            del G_kpq_kprimepq_chunk
-
-    cutensornet.destroy(handle)
-    return 0.5 * exx / nk
-
-
-def kpt_isdf_ecoul_kernel_rhf():
-    raise NotImplementedError("CPU ISDF Coulomb kernel for RHF not implemented yet.")
-    
-
-@jit(nopython=True, fastmath=True)
-def kpt_isdf_ecoul_kernel_uhf():
-    raise NotImplementedError("CPU ISDF Coulomb kernel for UHF not implemented yet.")
 
 @plum.dispatch
 def local_energy_kpt_single_det_uhf(
@@ -659,8 +525,8 @@ def local_energy_kpt_single_det_uhf(
     for ik in range(nk):
         diagGhalfa[:, ik, :, :] = ghalfa[:, ik, :, ik, :]
         diagGhalfb[:, ik, :, :] = ghalfb[:, ik, :, ik, :]
-    e1b = numpy.einsum('wkip, kip -> w', diagGhalfa, trial._rH1a) # Ghalfa.dot(trial._rH1a.ravel())
-    e1b += numpy.einsum('wkip, kip -> w', diagGhalfb, trial._rH1b)
+    e1b = numpy.einsum("wkip, kip -> w", diagGhalfa, trial._rH1a)  # Ghalfa.dot(trial._rH1a.ravel())
+    e1b += numpy.einsum("wkip, kip -> w", diagGhalfb, trial._rH1b)
     e1b /= nk
     e1b += hamiltonian.ecore
 
@@ -680,6 +546,7 @@ def local_energy_kpt_single_det_uhf(
     energy[:, 2] = e2b
 
     return energy
+
 
 @plum.dispatch
 def local_energy_kpt_single_det_uhf(
@@ -721,19 +588,35 @@ def local_energy_kpt_single_det_uhf(
         diagGhalfa = numpy.zeros((nwalkers, nk, nalpha, nbasis), dtype=numpy.complex128)
         for ik in range(nk):
             diagGhalfa[:, ik, :, :] = ghalfa[:, ik, :, ik, :]
-        e1b = 2.0 * numpy.einsum('wkip, kip -> w', diagGhalfa, trial._rH1a) # Ghalfa.dot(trial._rH1a.ravel())
+        e1b = 2.0 * numpy.einsum(
+            "wkip, kip -> w", diagGhalfa, trial._rH1a
+        )  # Ghalfa.dot(trial._rH1a.ravel())
         e1b /= nk
         e1b += hamiltonian.ecore
 
-        ghalfa = ghalfa.transpose(1, 3, 0, 2, 4).copy() # nk, nk, nw, nalpha, nbasis
-        ghalfaTcoul = ghalfaT.transpose(1, 3, 0, 2, 4).copy() # nk, nk, nw, nbasis, nalpha
-        ghalfaTx = ghalfaT.transpose(1, 3, 2, 4, 0).copy() # nk, nk, nbasis, nalpha, nw
+        ghalfa = ghalfa.transpose(1, 3, 0, 2, 4).copy()  # nk, nk, nw, nalpha, nbasis
+        ghalfaTcoul = ghalfaT.transpose(1, 3, 0, 2, 4).copy()  # nk, nk, nw, nbasis, nalpha
+        ghalfaTx = ghalfaT.transpose(1, 3, 2, 4, 0).copy()  # nk, nk, nbasis, nalpha, nw
 
         ecoul = kpt_symmchol_ecoul_kernel_rhf(
-            trial._rchola, trial._rcholbara, ghalfa, ghalfaTcoul, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus
+            trial._rchola,
+            trial._rcholbara,
+            ghalfa,
+            ghalfaTcoul,
+            hamiltonian.ikpq_mat,
+            hamiltonian.Sset,
+            hamiltonian.Qplus,
         )
 
-        exx = 2.0 * kpt_symmchol_exx_kernel(trial._rchola, trial._rcholbara, ghalfa, ghalfaTx, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus) 
+        exx = 2.0 * kpt_symmchol_exx_kernel(
+            trial._rchola,
+            trial._rcholbara,
+            ghalfa,
+            ghalfaTx,
+            hamiltonian.ikpq_mat,
+            hamiltonian.Sset,
+            hamiltonian.Qplus,
+        )
 
         e2b = ecoul + exx
 
@@ -752,25 +635,52 @@ def local_energy_kpt_single_det_uhf(
         for ik in range(nk):
             diagGhalfa[:, ik, :, :] = ghalfa[:, ik, :, ik, :]
             diagGhalfb[:, ik, :, :] = ghalfb[:, ik, :, ik, :]
-        e1b = numpy.einsum('wkip, kip -> w', diagGhalfa, trial._rH1a) # Ghalfa.dot(trial._rH1a.ravel())
-        e1b += numpy.einsum('wkip, kip -> w', diagGhalfb, trial._rH1b)
+        e1b = numpy.einsum(
+            "wkip, kip -> w", diagGhalfa, trial._rH1a
+        )  # Ghalfa.dot(trial._rH1a.ravel())
+        e1b += numpy.einsum("wkip, kip -> w", diagGhalfb, trial._rH1b)
         e1b /= nk
         e1b += hamiltonian.ecore
 
-        ghalfa = ghalfa.transpose(1, 3, 0, 2, 4).copy() # nk, nk, nw, nalpha, nbasis
-        ghalfb = ghalfb.transpose(1, 3, 0, 2, 4).copy() # nk, nk, nw, nbeta, nbasis
-        ghalfaTcoul = ghalfaT.transpose(1, 3, 0, 2, 4).copy() # nk, nk, nw, nbasis, nalpha
-        ghalfbTcoul = ghalfbT.transpose(1, 3, 0, 2, 4).copy() # nk, nk, nw, nbasis, nbeta
-        ghalfaTx = ghalfaT.transpose(1, 3, 2, 4, 0).copy() # nk, nk, nbasis, nalpha, nw
-        ghalfbTx = ghalfbT.transpose(1, 3, 2, 4, 0).copy() # nk, nk, nbasis, nbeta, nw
+        ghalfa = ghalfa.transpose(1, 3, 0, 2, 4).copy()  # nk, nk, nw, nalpha, nbasis
+        ghalfb = ghalfb.transpose(1, 3, 0, 2, 4).copy()  # nk, nk, nw, nbeta, nbasis
+        ghalfaTcoul = ghalfaT.transpose(1, 3, 0, 2, 4).copy()  # nk, nk, nw, nbasis, nalpha
+        ghalfbTcoul = ghalfbT.transpose(1, 3, 0, 2, 4).copy()  # nk, nk, nw, nbasis, nbeta
+        ghalfaTx = ghalfaT.transpose(1, 3, 2, 4, 0).copy()  # nk, nk, nbasis, nalpha, nw
+        ghalfbTx = ghalfbT.transpose(1, 3, 2, 4, 0).copy()  # nk, nk, nbasis, nbeta, nw
 
         ecoul = kpt_symmchol_ecoul_kernel_uhf(
-            trial._rchola, trial._rcholb, trial._rcholbara, trial._rcholbarb, ghalfa, ghalfb, ghalfaTcoul, ghalfbTcoul, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus
+            trial._rchola,
+            trial._rcholb,
+            trial._rcholbara,
+            trial._rcholbarb,
+            ghalfa,
+            ghalfb,
+            ghalfaTcoul,
+            ghalfbTcoul,
+            hamiltonian.ikpq_mat,
+            hamiltonian.Sset,
+            hamiltonian.Qplus,
         )
 
-        exxa = kpt_symmchol_exx_kernel(trial._rchola, trial._rcholbara, ghalfa, ghalfaTx, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus) 
-        exxb = kpt_symmchol_exx_kernel(trial._rcholb, trial._rcholbarb, ghalfb, ghalfbTx, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus)
-
+        exxa = kpt_symmchol_exx_kernel(
+            trial._rchola,
+            trial._rcholbara,
+            ghalfa,
+            ghalfaTx,
+            hamiltonian.ikpq_mat,
+            hamiltonian.Sset,
+            hamiltonian.Qplus,
+        )
+        exxb = kpt_symmchol_exx_kernel(
+            trial._rcholb,
+            trial._rcholbarb,
+            ghalfb,
+            ghalfbTx,
+            hamiltonian.ikpq_mat,
+            hamiltonian.Sset,
+            hamiltonian.Qplus,
+        )
 
         e2b = ecoul + exxa + exxb
 
@@ -779,111 +689,4 @@ def local_energy_kpt_single_det_uhf(
         energy[:, 1] = e1b
         energy[:, 2] = e2b
 
-    return energy
-
-
-@plum.dispatch
-def local_energy_kpt_single_det_uhf(
-    system: Generic,
-    hamiltonian: KptISDF,
-    walkers: UHFWalkers,
-    trial: KptSingleDet,
-):
-    """Compute local energy for walker batch (all walkers at once).
-
-    Single determinant RHF case.
-
-    Parameters
-    ----------
-    system : system object
-        System being studied.
-    hamiltonian : hamiltonian object
-        Hamiltonian being studied.
-    walkers : WalkerBatch
-        Walkers object.
-    trial : trial object
-        Trial wavefunctioni.
-
-    Returns
-    -------
-    local_energy : np.ndarray
-        Total, one-body and two-body energies.
-    """
-    if config.get_option("use_gpu"):
-        return local_energy_kpt_single_det_uhf_isdf_gpu(system, hamiltonian, walkers, trial)
-    else:
-        raise NotImplementedError("CPU ISDF Coulomb kernel for UHF not implemented yet.")
-    
-
-def local_energy_kpt_single_det_uhf_isdf_gpu(system, hamiltonian, walkers, trial):
-    """Compute local energy for walker batch (all walkers at once).
-
-    Single determinant RHF case.
-
-    Parameters
-    ----------
-    system : system object
-        System being studied.
-    hamiltonian : hamiltonian object
-        Hamiltonian being studied.
-    walkers : WalkerBatch
-        Walkers object.
-    trial : trial object
-        Trial wavefunctioni.
-
-    Returns
-    -------
-    local_energy : np.ndarray
-        Total, one-body and two-body energies.
-    """
-    nwalkers = walkers.Ghalfa.shape[0]
-    nk = hamiltonian.nk
-    nalpha = trial.nalpha
-    nbeta = trial.nbeta
-    nbasis = hamiltonian.nbasis
-
-    if walkers.rhf:
-        ghalfa = walkers.Ghalfa.reshape(nwalkers, nk, nalpha, nk, nbasis)
-        diagGhalfa = xp.zeros((nwalkers, nk, nalpha, nbasis), dtype=numpy.complex128)
-        for ik in range(nk):
-            diagGhalfa[:, ik, :, :] = ghalfa[:, ik, :, ik, :]
-        diagGhalfa = diagGhalfa.reshape(nwalkers, nk * nalpha * nbasis)
-        e1b = 2. * diagGhalfa.dot(trial._rH1a.ravel())
-        e1b /= nk
-        e1b += hamiltonian.ecore
-
-        ecoul = kpt_isdf_ecoul_rhf_kernel_gpu(hamiltonian.MPQ, trial._rcgtoa, hamiltonian.cgto, ghalfa, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus)
-
-        exxa = 2.0 * kpt_isdf_exx_kernel_gpu(hamiltonian.MPQ, trial._rcgtoa, hamiltonian.cgto, ghalfa, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus)
-
-        e2b = ecoul + exxa
-    else:
-        ghalfa = walkers.Ghalfa.reshape(nwalkers, nk, nalpha, nk, nbasis)
-        ghalfb = walkers.Ghalfb.reshape(nwalkers, nk, nbeta, nk, nbasis)
-
-        diagGhalfa = xp.zeros((nwalkers, nk, nalpha, nbasis), dtype=numpy.complex128)
-        diagGhalfb = xp.zeros((nwalkers, nk, nbeta, nbasis), dtype=numpy.complex128)
-        for ik in range(nk):
-            diagGhalfa[:, ik, :, :] = ghalfa[:, ik, :, ik, :]
-            diagGhalfb[:, ik, :, :] = ghalfb[:, ik, :, ik, :]
-        diagGhalfa = diagGhalfa.reshape(nwalkers, nk * nalpha * nbasis)
-        diagGhalfb = diagGhalfb.reshape(nwalkers, nk * nbeta * nbasis)
-        e1b = diagGhalfa.dot(trial._rH1a.ravel())
-        e1b += diagGhalfb.dot(trial._rH1b.ravel())
-        e1b /= nk
-        e1b += hamiltonian.ecore
-
-        ecoul = kpt_isdf_ecoul_kernel_gpu(hamiltonian.MPQ, trial._rcgtoa, trial._rcgtob, hamiltonian.cgto, ghalfa, ghalfb, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus)
-
-        exxa = kpt_isdf_exx_kernel_gpu(hamiltonian.MPQ, trial._rcgtoa, hamiltonian.cgto, ghalfa, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus)
-        exxb = kpt_isdf_exx_kernel_gpu(hamiltonian.MPQ, trial._rcgtob, hamiltonian.cgto, ghalfb, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus)
-
-        e2b = ecoul + exxa + exxb
-
-    energy = xp.zeros((nwalkers, 3), dtype=numpy.complex128)
-    energy[:, 0] = e1b + e2b
-    energy[:, 1] = e1b
-    energy[:, 2] = e2b
-
-    xp._default_memory_pool.free_all_blocks()
     return energy

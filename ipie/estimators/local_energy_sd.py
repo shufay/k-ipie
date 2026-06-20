@@ -18,9 +18,7 @@
 
 import numpy
 from numba import jit
-from math import ceil, sqrt
-from cuquantum.bindings import cutensornet
-from cuquantum.tensornet import NetworkOptions, contract
+from math import ceil
 
 from ipie.estimators.local_energy import local_energy_G
 from ipie.estimators.kernels import exchange_reduction
@@ -1018,60 +1016,98 @@ def local_energy_single_det_batch_gpu(system, hamiltonian, walkers, trial, max_m
     nbeta = walkers.Ghalfb.shape[1]
     nbasis = walkers.Ghalfa.shape[-1]
     nchol = hamiltonian.nchol
+    if walkers.rhf:
+        Ghalfa = walkers.Ghalfa.reshape(nwalkers, nalpha * nbasis)
 
-    Ghalfa = walkers.Ghalfa.reshape(nwalkers, nalpha * nbasis)
-    Ghalfb = walkers.Ghalfb.reshape(nwalkers, nbeta * nbasis)
+        e1b = Ghalfa.dot(trial._rH1a.ravel()) * 2.0 + hamiltonian.ecore
 
-    e1b = Ghalfa.dot(trial._rH1a.ravel()) + Ghalfb.dot(trial._rH1b.ravel()) + hamiltonian.ecore
+        if xp.isrealobj(trial._rchola):
+            Xa = trial._rchola.dot(Ghalfa.real.T) + 1.0j * trial._rchola.dot(
+                Ghalfa.imag.T
+            )  # naux x nwalkers
+        else:
+            Xa = trial._rchola.dot(Ghalfa.T)
 
-    if xp.isrealobj(trial._rchola):
-        Xa = trial._rchola.dot(Ghalfa.real.T) + 1.0j * trial._rchola.dot(
-            Ghalfa.imag.T
-        )  # naux x nwalkers
-        Xb = trial._rcholb.dot(Ghalfb.real.T) + 1.0j * trial._rcholb.dot(
-            Ghalfb.imag.T
-        )  # naux x nwalkers
+        ecoul = 4.0 * xp.einsum("xw,xw->w", Xa, Xa, optimize=True)
+
+        max_nocc = max(nalpha, nbeta)
+        mem_needed = 16 * nwalkers * max_nocc * max_nocc * nchol / (1024.0**3.0)
+        num_chunks = max(1, ceil(mem_needed / max_mem))
+        chunk_size = ceil(nchol / num_chunks)
+        nchol_chunks = ceil(nchol / chunk_size)
+
+        # Buffer for large intermediate tensor
+        buff = xp.zeros(shape=(nwalkers * chunk_size * max_nocc * max_nocc), dtype=xp.complex128)
+        nchol_chunk_size = chunk_size
+        nchol_left = nchol
+        exx = xp.zeros(nwalkers, dtype=xp.complex128)
+        Ghalfa = walkers.Ghalfa.reshape((nwalkers * nalpha, nbasis))
+        for i in range(nchol_chunks):
+            nchol_chunk = min(nchol_chunk_size, nchol_left)
+            chol_sls = slice(i * chunk_size, i * chunk_size + nchol_chunk)
+            size = nwalkers * nchol_chunk * nalpha * nalpha
+            # alpha-alpha
+            Txij = buff[:size].reshape((nchol_chunk * nalpha, nwalkers * nalpha))
+            rchol = trial._rchola[chol_sls].reshape((nchol_chunk * nalpha, nbasis))
+            xp.dot(rchol, Ghalfa.T, out=Txij)
+            Txij = Txij.reshape((nchol_chunk, nalpha, nwalkers, nalpha))
+            exchange_reduction(Txij, exx)
+            nchol_left -= chunk_size
+        e2b = 0.5 * (ecoul - 2.0 * exx)
     else:
-        Xa = trial._rchola.dot(Ghalfa.T)
-        Xb = trial._rcholb.dot(Ghalfb.T)
+        Ghalfa = walkers.Ghalfa.reshape(nwalkers, nalpha * nbasis)
+        Ghalfb = walkers.Ghalfb.reshape(nwalkers, nbeta * nbasis)
 
-    ecoul = xp.einsum("xw,xw->w", Xa, Xa, optimize=True)
-    ecoul += xp.einsum("xw,xw->w", Xb, Xb, optimize=True)
-    ecoul += 2.0 * xp.einsum("xw,xw->w", Xa, Xb, optimize=True)
+        e1b = Ghalfa.dot(trial._rH1a.ravel()) + Ghalfb.dot(trial._rH1b.ravel()) + hamiltonian.ecore
 
-    max_nocc = max(nalpha, nbeta)
-    mem_needed = 16 * nwalkers * max_nocc * max_nocc * nchol / (1024.0**3.0)
-    num_chunks = max(1, ceil(mem_needed / max_mem))
-    chunk_size = ceil(nchol / num_chunks)
-    nchol_chunks = ceil(nchol / chunk_size)
+        if xp.isrealobj(trial._rchola):
+            Xa = trial._rchola.dot(Ghalfa.real.T) + 1.0j * trial._rchola.dot(
+                Ghalfa.imag.T
+            )  # naux x nwalkers
+            Xb = trial._rcholb.dot(Ghalfb.real.T) + 1.0j * trial._rcholb.dot(
+                Ghalfb.imag.T
+            )  # naux x nwalkers
+        else:
+            Xa = trial._rchola.dot(Ghalfa.T)
+            Xb = trial._rcholb.dot(Ghalfb.T)
 
-    # Buffer for large intermediate tensor
-    buff = xp.zeros(shape=(nwalkers * chunk_size * max_nocc * max_nocc), dtype=xp.complex128)
-    nchol_chunk_size = chunk_size
-    nchol_left = nchol
-    exx = xp.zeros(nwalkers, dtype=xp.complex128)
-    Ghalfa = walkers.Ghalfa.reshape((nwalkers * nalpha, nbasis))
-    Ghalfb = walkers.Ghalfb.reshape((nwalkers * nbeta, nbasis))
-    for i in range(nchol_chunks):
-        nchol_chunk = min(nchol_chunk_size, nchol_left)
-        chol_sls = slice(i * chunk_size, i * chunk_size + nchol_chunk)
-        size = nwalkers * nchol_chunk * nalpha * nalpha
-        # alpha-alpha
-        Txij = buff[:size].reshape((nchol_chunk * nalpha, nwalkers * nalpha))
-        rchol = trial._rchola[chol_sls].reshape((nchol_chunk * nalpha, nbasis))
-        xp.dot(rchol, Ghalfa.T, out=Txij)
-        Txij = Txij.reshape((nchol_chunk, nalpha, nwalkers, nalpha))
-        exchange_reduction(Txij, exx)
-        # beta-beta
-        size = nwalkers * nchol_chunk * nbeta * nbeta
-        Txij = buff[:size].reshape((nchol_chunk * nbeta, nwalkers * nbeta))
-        rchol = trial._rcholb[chol_sls].reshape((nchol_chunk * nbeta, nbasis))
-        xp.dot(rchol, Ghalfb.T, out=Txij)
-        Txij = Txij.reshape((nchol_chunk, nbeta, nwalkers, nbeta))
-        exchange_reduction(Txij, exx)
-        nchol_left -= chunk_size
+        ecoul = xp.einsum("xw,xw->w", Xa, Xa, optimize=True)
+        ecoul += xp.einsum("xw,xw->w", Xb, Xb, optimize=True)
+        ecoul += 2.0 * xp.einsum("xw,xw->w", Xa, Xb, optimize=True)
 
-    e2b = 0.5 * (ecoul - exx)
+        max_nocc = max(nalpha, nbeta)
+        mem_needed = 16 * nwalkers * max_nocc * max_nocc * nchol / (1024.0**3.0)
+        num_chunks = max(1, ceil(mem_needed / max_mem))
+        chunk_size = ceil(nchol / num_chunks)
+        nchol_chunks = ceil(nchol / chunk_size)
+
+        # Buffer for large intermediate tensor
+        buff = xp.zeros(shape=(nwalkers * chunk_size * max_nocc * max_nocc), dtype=xp.complex128)
+        nchol_chunk_size = chunk_size
+        nchol_left = nchol
+        exx = xp.zeros(nwalkers, dtype=xp.complex128)
+        Ghalfa = walkers.Ghalfa.reshape((nwalkers * nalpha, nbasis))
+        Ghalfb = walkers.Ghalfb.reshape((nwalkers * nbeta, nbasis))
+        for i in range(nchol_chunks):
+            nchol_chunk = min(nchol_chunk_size, nchol_left)
+            chol_sls = slice(i * chunk_size, i * chunk_size + nchol_chunk)
+            size = nwalkers * nchol_chunk * nalpha * nalpha
+            # alpha-alpha
+            Txij = buff[:size].reshape((nchol_chunk * nalpha, nwalkers * nalpha))
+            rchol = trial._rchola[chol_sls].reshape((nchol_chunk * nalpha, nbasis))
+            xp.dot(rchol, Ghalfa.T, out=Txij)
+            Txij = Txij.reshape((nchol_chunk, nalpha, nwalkers, nalpha))
+            exchange_reduction(Txij, exx)
+            # beta-beta
+            size = nwalkers * nchol_chunk * nbeta * nbeta
+            Txij = buff[:size].reshape((nchol_chunk * nbeta, nwalkers * nbeta))
+            rchol = trial._rcholb[chol_sls].reshape((nchol_chunk * nbeta, nbasis))
+            xp.dot(rchol, Ghalfb.T, out=Txij)
+            Txij = Txij.reshape((nchol_chunk, nbeta, nwalkers, nbeta))
+            exchange_reduction(Txij, exx)
+            nchol_left -= chunk_size
+
+        e2b = 0.5 * (ecoul - exx)
 
     energy = xp.zeros((nwalkers, 3), dtype=numpy.complex128)
     energy[:, 0] = e1b + e2b
@@ -1079,114 +1115,4 @@ def local_energy_single_det_batch_gpu(system, hamiltonian, walkers, trial, max_m
     energy[:, 2] = e2b
 
     synchronize()
-    return energy
-
-def ecoul_kernel_batch_real_isdf_uhf_gpu(MPQ, halfrot_cgtoa, halfrot_cgtob, cgto, Ghalfa_batch, Ghalfb_batch):
-    nwalkers = Ghalfa_batch.shape[0]
-    ecoul = xp.zeros(nwalkers, dtype=numpy.complex128)
-    handle = cutensornet.create()
-    network_opts = NetworkOptions(handle=handle)
-
-    v_wP_real = contract('Pi, Pp, wip -> wP', halfrot_cgtoa, cgto, Ghalfa_batch.real, options=network_opts) + contract('Pi, Pp, wip -> wP', halfrot_cgtob, cgto, Ghalfb_batch.real, options=network_opts)
-    v_wP_imag = contract('Pi, Pp, wip -> wP', halfrot_cgtoa, cgto, Ghalfa_batch.imag, options=network_opts) + contract('Pi, Pp, wip -> wP', halfrot_cgtob, cgto, Ghalfb_batch.imag, options=network_opts)
-    v_wP = xp.zeros_like(v_wP_real, dtype=xp.complex128)
-    v_wP.real = v_wP_real
-    v_wP.imag = v_wP_imag
-    ecoul += xp.sum((v_wP @ MPQ) * v_wP, axis=1)
-    cutensornet.destroy(handle)
-    return .5 * ecoul
-
-def ecoul_kernel_batch_real_isdf_rhf_gpu(MPQ, halfrot_cgtoa, cgto, Ghalfa_batch):
-    nwalkers = Ghalfa_batch.shape[0]
-    ecoul = xp.zeros(nwalkers, dtype=numpy.complex128)
-    handle = cutensornet.create()
-    network_opts = NetworkOptions(handle=handle)
-
-    v_wP_real = 2.0 * contract('Pi, Pp, wip -> wP', halfrot_cgtoa, cgto, Ghalfa_batch.real, options=network_opts)
-    v_wP_imag = 2.0 * contract('Pi, Pp, wip -> wP', halfrot_cgtoa, cgto, Ghalfa_batch.imag, options=network_opts)
-    v_wP = xp.zeros_like(v_wP_real, dtype=xp.complex128)
-    v_wP.real = v_wP_real
-    v_wP.imag = v_wP_imag
-    ecoul += xp.sum((v_wP @ MPQ) * v_wP, axis=1)
-    cutensornet.destroy(handle)
-    return .5 * ecoul
-
-def exx_kernel_batch_real_isdf_uhf_gpu(MPQ, halfrot_cgtoa, cgto, Ghalfa_batch):
-    nwalkers = Ghalfa_batch.shape[0]
-    exx = xp.zeros(nwalkers, dtype=numpy.complex128)
-    nisdf = MPQ.shape[0]
-    intermediate_mem = nwalkers * nisdf * nisdf * 16 * 2
-    mem_limit = 0.3 * xp.cuda.Device().mem_info[0]
-    num_chunks = max(1, ceil(sqrt(intermediate_mem/ mem_limit)))
-    chunk_size = ceil(nisdf / num_chunks)
-    nisdfx_left = nisdf
-    slices_x = []
-    for i_chunk in range(num_chunks):
-        if nisdfx_left == 0:
-            break
-        nx_chunk = min(nisdfx_left, chunk_size)
-        nisdfx_left -= nx_chunk
-        slices_x.append(slice(i_chunk * chunk_size, i_chunk * chunk_size + nx_chunk))
-
-    for slicex in slices_x:
-        cgto_chunkx = cgto[slicex]
-        halfrot_cgto_chunkx = halfrot_cgtoa[slicex]
-        for slicey in slices_x:
-            cgto_chunky = cgto[slicey]
-            halfrot_cgto_chunky = halfrot_cgtoa[slicey]
-            MPQ_chunk = MPQ[slicey, slicex].copy()
-            MPQ_chunk = MPQ_chunk.ravel()
-            Gpsi_wiQ = Ghalfa_batch @ cgto_chunkx.T
-            TPQ_chunk = halfrot_cgto_chunky @ Gpsi_wiQ
-            TPQ_chunk = TPQ_chunk.copy()
-            Gpsi_wjP = Ghalfa_batch @ cgto_chunky.T
-            TQP_chunk = halfrot_cgto_chunkx @ Gpsi_wjP
-            TQP_chunk = TQP_chunk.copy()
-            TQP_chunk = TQP_chunk.transpose(0, 2, 1).copy()
-            # reshape TPQ and TQP to nwalker, nisdf * nchunk
-            len_slicex = len(range(*slicex.indices(nisdf)))
-            len_slicey = len(range(*slicey.indices(nisdf)))
-            TPQ_chunk = TPQ_chunk.reshape(nwalkers, len_slicex * len_slicey)
-            TQP_chunk = TQP_chunk.reshape(nwalkers, len_slicex * len_slicey)
-            contrib = xp.sum(TPQ_chunk * TQP_chunk * MPQ_chunk[xp.newaxis, :], axis=1)
-            exx += contrib
-    return .5 * exx
-
-def local_energy_single_det_isdf_batch_gpu(system, hamiltonian, walkers, trial, max_mem=2.0):
-    nwalkers = walkers.Ghalfa.shape[0]
-    if walkers.rhf:
-        Ghalfa_batch = walkers.Ghalfa.reshape((nwalkers, -1))
-
-        e1b = 2.0 * Ghalfa_batch.dot(trial._rH1a.ravel())
-        e1b += hamiltonian.ecore
-    else:
-        Ghalfa_batch = walkers.Ghalfa.reshape((nwalkers, -1))
-        Ghalfb_batch = walkers.Ghalfb.reshape((nwalkers, -1))
-
-        e1b = Ghalfa_batch.dot(trial._rH1a.ravel())
-        e1b += Ghalfb_batch.dot(trial._rH1b.ravel())
-        e1b += hamiltonian.ecore
-
-    if walkers.rhf:
-        ecoul = ecoul_kernel_batch_real_isdf_rhf_gpu(
-            hamiltonian.MPQ, trial._rcgtoa, hamiltonian.cgto, walkers.Ghalfa
-        )
-        exx = 2. * exx_kernel_batch_real_isdf_uhf_gpu(
-            hamiltonian.MPQ, trial._rcgtoa, hamiltonian.cgto, walkers.Ghalfa
-        )
-    else:
-        ecoul = ecoul_kernel_batch_real_isdf_uhf_gpu(
-            hamiltonian.MPQ, trial._rcgtoa, trial._rcgtob, hamiltonian.cgto, walkers.Ghalfa, walkers.Ghalfb
-        )
-        exx = exx_kernel_batch_real_isdf_uhf_gpu(
-            hamiltonian.MPQ, trial._rcgtoa, hamiltonian.cgto, walkers.Ghalfa,
-        ) + exx_kernel_batch_real_isdf_uhf_gpu(
-            hamiltonian.MPQ, trial._rcgtob, hamiltonian.cgto, walkers.Ghalfb,
-        )
-    e2b = ecoul - exx
-
-    energy = xp.zeros((nwalkers, 3), dtype=numpy.complex128)
-    energy[:, 0] = e1b + e2b
-    energy[:, 1] = e1b
-    energy[:, 2] = e2b
     return energy

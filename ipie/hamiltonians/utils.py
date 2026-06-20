@@ -20,9 +20,9 @@ import time
 
 import numpy
 
-from ipie.hamiltonians.generic import construct_h1e_mod, Generic, read_integrals, read_kpt_integrals
+from ipie.hamiltonians.generic import construct_h1e_mod, Generic, read_integrals
 from ipie.hamiltonians.generic import GenericComplexChol
-from ipie.hamiltonians.kpt_hamiltonian import KptComplexCholSymm
+from ipie.hamiltonians.kpt_hamiltonian import KptComplexCholSymm, read_kpt_integrals
 from ipie.utils.mpi import get_shared_array, have_shared_mem
 from ipie.utils.pack_numba import pack_cholesky
 
@@ -98,6 +98,7 @@ def get_hamiltonian(filename, scomm, verbose=False, pack_chol=True):
 
     return ham
 
+
 def get_kpt_hamiltonian(filename, scomm, verbose=False):
     """Wrapper to select hamiltonian class with integrals in shared memory.
 
@@ -123,11 +124,6 @@ def get_kpt_hamiltonian(filename, scomm, verbose=False):
         print(f"# Time to read integrals: {time.time() - start:.6f}")
 
     start = time.time()
-
-    nbsf = hcore.shape[-1]
-    nchol = chol.shape[0]
-
-    shmem = have_shared_mem(scomm)
 
     ham = KptComplexCholSymm(h1e=hcore, chol=chol, kpts=kpts, ecore=enuc, verbose=verbose)
 
@@ -162,7 +158,6 @@ def get_complex_hamiltonian(filename, scomm, verbose=False):
 
     nbsf = hcore.shape[-1]
     nchol = chol.shape[-1]
-    idx = numpy.triu_indices(nbsf)
 
     chol = chol.reshape((nbsf, nbsf, nchol))
     assert chol.dtype == numpy.complex128
@@ -172,7 +167,6 @@ def get_complex_hamiltonian(filename, scomm, verbose=False):
         if scomm.rank == 0:
             dtype = chol.dtype
         else:
-            cp_shape = None
             dtype = None
 
         dtype = scomm.bcast(dtype, root=0)
@@ -193,11 +187,14 @@ def get_complex_hamiltonian(filename, scomm, verbose=False):
         print(f"# Time to pack Cholesky vectors: {time.time() - start:.6f}")
 
     if shmem:
-        ham = GenericComplexChol(h1e=hcore, chol=chol, ecore=enuc, shmem=True, A=A, B=B, verbose=verbose)
+        ham = GenericComplexChol(
+            h1e=hcore, chol=chol, ecore=enuc, shmem=True, A=A, B=B, verbose=verbose
+        )
     else:
         ham = Generic(h1e=hcore, chol=chol, ecore=enuc, verbose=verbose)
 
     return ham
+
 
 def get_generic_integrals(filename, comm=None, verbose=False):
     """Read generic integrals, potentially into shared memory.
@@ -261,6 +258,7 @@ def get_generic_integrals(filename, comm=None, verbose=False):
         h1e_mod = numpy.zeros(h1.shape, dtype=h1.dtype)
         construct_h1e_mod(chol, h1, h1e_mod)
         return h1, chol, h1e_mod, enuc
+
 
 def get_kpt_integrals(filename, comm=None, verbose=False):
     """Read kpt integrals, potentially into shared memory.

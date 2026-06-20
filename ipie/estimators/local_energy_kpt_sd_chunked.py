@@ -1,32 +1,48 @@
-# from line_profiler import LineProfiler
-from math import ceil, sqrt
+# Copyright 2022 The ipie Developers. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Authors: Jinghong Zhang <jinghongzhang@fas.harvard.edu>
+#
+#
+
+from math import ceil
 
 import numpy
-from numba import jit
 
-from ipie.estimators.local_energy import local_energy_G
 from ipie.estimators.kernels import exx_kpt_kernel
 from ipie.utils.backend import arraylib as xp
-from ipie.utils.backend import synchronize
 from ipie.config import config
-from ipie.utils.backend import get_device_memory
 
 from ipie.systems.generic import Generic
 from ipie.hamiltonians.kpt_chunked import KptComplexCholChunked
 from ipie.walkers.uhf_walkers import UHFWalkers
 from ipie.trial_wavefunction.single_det_kpt import KptSingleDet
-from ipie.estimators.local_energy_kpt_sd import kpt_symmchol_ecoul_kernel_uhf, kpt_symmchol_exx_kernel
-
-import time
+from ipie.estimators.local_energy_kpt_sd import (
+    kpt_symmchol_ecoul_kernel_uhf,
+    kpt_symmchol_exx_kernel,
+)
 
 # from line_profiler import profile
 
 import plum
+
 # Note specialisations occur to because:
 # 1. Numba does not allow for mixing types without a warning so need to split
 # real and complex components apart when rchol is real. Green's function is
 # complex in general.
 # Optimize for case when wavefunction is RHF (factor of 2 saving)
+
 
 @plum.dispatch
 def local_energy_kpt_single_det_uhf_chunked(
@@ -56,9 +72,12 @@ def local_energy_kpt_single_det_uhf_chunked(
         Total, one-body and two-body energies.
     """
     if config.get_option("use_gpu"):
-        return local_energy_kpt_single_det_uhf_batch_chunked_gpu(system, hamiltonian, walkers, trial)
+        return local_energy_kpt_single_det_uhf_batch_chunked_gpu(
+            system, hamiltonian, walkers, trial
+        )
     else:
         return local_energy_kpt_single_det_uhf_chunked_cpu(system, hamiltonian, walkers, trial)
+
 
 def local_energy_kpt_single_det_uhf_chunked_cpu(
     system: Generic,
@@ -111,12 +130,12 @@ def local_energy_kpt_single_det_uhf_chunked_cpu(
     e1b /= nk
     e1b += hamiltonian.ecore
 
-    ghalfa = ghalfa.transpose(1, 3, 0, 2, 4).copy() # nk, nk, nw, nalpha, nbasis
-    ghalfb = ghalfb.transpose(1, 3, 0, 2, 4).copy() # nk, nk, nw, nbeta, nbasis
-    ghalfaTcoul = ghalfaT.transpose(1, 3, 0, 2, 4).copy() # nk, nk, nw, nbasis, nalpha
-    ghalfbTcoul = ghalfbT.transpose(1, 3, 0, 2, 4).copy() # nk, nk, nw, nbasis, nbeta
-    ghalfaTx = ghalfaT.transpose(1, 3, 2, 4, 0).copy() # nk, nk, nbasis, nalpha, nw
-    ghalfbTx = ghalfbT.transpose(1, 3, 2, 4, 0).copy() # nk, nk, nbasis, nbeta, nw
+    ghalfa = ghalfa.transpose(1, 3, 0, 2, 4).copy()  # nk, nk, nw, nalpha, nbasis
+    ghalfb = ghalfb.transpose(1, 3, 0, 2, 4).copy()  # nk, nk, nw, nbeta, nbasis
+    ghalfaTcoul = ghalfaT.transpose(1, 3, 0, 2, 4).copy()  # nk, nk, nw, nbasis, nalpha
+    ghalfbTcoul = ghalfbT.transpose(1, 3, 0, 2, 4).copy()  # nk, nk, nw, nbasis, nbeta
+    ghalfaTx = ghalfaT.transpose(1, 3, 2, 4, 0).copy()  # nk, nk, nbasis, nalpha, nw
+    ghalfbTx = ghalfbT.transpose(1, 3, 2, 4, 0).copy()  # nk, nk, nbasis, nbeta, nw
 
     ghalfa_send = ghalfa.copy()
     ghalfb_send = ghalfb.copy()
@@ -142,11 +161,37 @@ def local_energy_kpt_single_det_uhf_chunked_cpu(
     rcholbarb_chunk = trial._rcholbarb_chunk
 
     ecoul_send = kpt_symmchol_ecoul_kernel_uhf(
-        rchola_chunk, rcholb_chunk, rcholbara_chunk, rcholbarb_chunk, ghalfa, ghalfb, ghalfaTcoul, ghalfbTcoul, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus
+        rchola_chunk,
+        rcholb_chunk,
+        rcholbara_chunk,
+        rcholbarb_chunk,
+        ghalfa,
+        ghalfb,
+        ghalfaTcoul,
+        ghalfbTcoul,
+        hamiltonian.ikpq_mat,
+        hamiltonian.Sset,
+        hamiltonian.Qplus,
     )
 
-    exx_send = kpt_symmchol_exx_kernel(rchola_chunk, rcholbara_chunk, ghalfa, ghalfaTx, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus) 
-    exx_send += kpt_symmchol_exx_kernel(rcholb_chunk, rcholbarb_chunk, ghalfb, ghalfbTx, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus) 
+    exx_send = kpt_symmchol_exx_kernel(
+        rchola_chunk,
+        rcholbara_chunk,
+        ghalfa,
+        ghalfaTx,
+        hamiltonian.ikpq_mat,
+        hamiltonian.Sset,
+        hamiltonian.Qplus,
+    )
+    exx_send += kpt_symmchol_exx_kernel(
+        rcholb_chunk,
+        rcholbarb_chunk,
+        ghalfb,
+        ghalfbTx,
+        hamiltonian.ikpq_mat,
+        hamiltonian.Sset,
+        hamiltonian.Qplus,
+    )
 
     exx_recv = exx_send.copy()
     ecoul_recv = ecoul_send.copy()
@@ -174,21 +219,46 @@ def local_energy_kpt_single_det_uhf_chunked_cpu(
                 handler.scomm.Recv(exx_recv, source=sender, tag=8)
         handler.scomm.barrier()
 
-    # prepare sending
+        # prepare sending
         ecoul_send = ecoul_recv.copy()
         ecoul_send += kpt_symmchol_ecoul_kernel_uhf(
-        rchola_chunk, rcholb_chunk, rcholbara_chunk, rcholbarb_chunk, ghalfa_recv, ghalfb_recv, ghalfaTcoul_recv, ghalfbTcoul_recv, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus
-    )
+            rchola_chunk,
+            rcholb_chunk,
+            rcholbara_chunk,
+            rcholbarb_chunk,
+            ghalfa_recv,
+            ghalfb_recv,
+            ghalfaTcoul_recv,
+            ghalfbTcoul_recv,
+            hamiltonian.ikpq_mat,
+            hamiltonian.Sset,
+            hamiltonian.Qplus,
+        )
         exx_send = exx_recv.copy()
-        exx_send += kpt_symmchol_exx_kernel(rchola_chunk, rcholbara_chunk, ghalfa_recv, ghalfaTx_recv, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus)
-        exx_send += kpt_symmchol_exx_kernel(rcholb_chunk, rcholbarb_chunk, ghalfb_recv, ghalfbTx_recv, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus)
+        exx_send += kpt_symmchol_exx_kernel(
+            rchola_chunk,
+            rcholbara_chunk,
+            ghalfa_recv,
+            ghalfaTx_recv,
+            hamiltonian.ikpq_mat,
+            hamiltonian.Sset,
+            hamiltonian.Qplus,
+        )
+        exx_send += kpt_symmchol_exx_kernel(
+            rcholb_chunk,
+            rcholbarb_chunk,
+            ghalfb_recv,
+            ghalfbTx_recv,
+            hamiltonian.ikpq_mat,
+            hamiltonian.Sset,
+            hamiltonian.Qplus,
+        )
         ghalfa_send = ghalfa_recv.copy()
         ghalfb_send = ghalfb_recv.copy()
         ghalfaTcoul_send = ghalfaTcoul_recv.copy()
         ghalfbTcoul_send = ghalfbTcoul_recv.copy()
         ghalfaTx_send = ghalfaTx_recv.copy()
         ghalfbTx_send = ghalfbTx_recv.copy()
-
 
     if len(senders) > 1:
         for isend, sender in enumerate(senders):
@@ -207,14 +277,15 @@ def local_energy_kpt_single_det_uhf_chunked_cpu(
 
     return energy
 
-def kpt_symmchol_ecoul_kernel_batch_uhf_gpu(rchola, rcholb, rcholbara, rcholbarb, Ghalfa, Ghalfb, kpq_mat, Sset, Qplus):
+
+def kpt_symmchol_ecoul_kernel_batch_uhf_gpu(
+    rchola, rcholb, rcholbara, rcholbarb, Ghalfa, Ghalfb, kpq_mat, Sset, Qplus
+):
     nwalkers = Ghalfa.shape[2]
 
     # shape of rchola: (nq, nk, nocc, naux, nbsf) (q, k, gamma, i, p)
     # shape of Ghalf: (nk, nk, nw, nocc, nbsf)
     unique_nq = len(Sset) + len(Qplus)
-    nbsf = rchola.shape[4]
-    nocc = rchola.shape[2]
     naux = rchola.shape[3]
     nk = rchola.shape[1]
     ecoul = xp.zeros((nwalkers), dtype=numpy.complex128)
@@ -232,8 +303,12 @@ def kpt_symmchol_ecoul_kernel_batch_uhf_gpu(rchola, rcholb, rcholbara, rcholbarb
             rcholb_q = rcholb[iq]
             rcholbara_q = rcholbara[iq]
             rcholbarb_q = rcholbarb[iq]
-            X[iq] = xp.einsum("kixp, kkwip -> xw", rchola_q, Ga_kpq, optimize=True) + xp.einsum("kixp, kkwip -> xw", rcholb_q, Gb_kpq, optimize=True)
-            Xbar[iq] = xp.einsum("ksxj, kkwjs -> xw", rcholbara_q, GaT_kpq, optimize=True) + xp.einsum("ksxj, kkwjs -> xw", rcholbarb_q, GbT_kpq, optimize=True)
+            X[iq] = xp.einsum("kixp, kkwip -> xw", rchola_q, Ga_kpq, optimize=True) + xp.einsum(
+                "kixp, kkwip -> xw", rcholb_q, Gb_kpq, optimize=True
+            )
+            Xbar[iq] = xp.einsum(
+                "ksxj, kkwjs -> xw", rcholbara_q, GaT_kpq, optimize=True
+            ) + xp.einsum("ksxj, kkwjs -> xw", rcholbarb_q, GbT_kpq, optimize=True)
 
         for iq in range(len(Sset), unique_nq):
             iq_real = Qplus[iq - len(Sset)]
@@ -246,9 +321,15 @@ def kpt_symmchol_ecoul_kernel_batch_uhf_gpu(rchola, rcholb, rcholbara, rcholbarb
             rcholb_q = rcholb[iq]
             rcholbara_q = rcholbara[iq]
             rcholbarb_q = rcholbarb[iq]
-            X[iq] = xp.sqrt(2) * (xp.einsum("kixp, kkwip -> xw", rchola_q, Ga_kpq, optimize=True) + xp.einsum("kixp, kkwip -> xw", rcholb_q, Gb_kpq, optimize=True))
-            Xbar[iq] = xp.sqrt(2) * (xp.einsum("ksxj, kkwjs -> xw", rcholbara_q, GaT_kpq, optimize=True) + xp.einsum("ksxj, kkwjs -> xw", rcholbarb_q, GbT_kpq, optimize=True))
-            #TODO: possibly write a kernel for this
+            X[iq] = xp.sqrt(2) * (
+                xp.einsum("kixp, kkwip -> xw", rchola_q, Ga_kpq, optimize=True)
+                + xp.einsum("kixp, kkwip -> xw", rcholb_q, Gb_kpq, optimize=True)
+            )
+            Xbar[iq] = xp.sqrt(2) * (
+                xp.einsum("ksxj, kkwjs -> xw", rcholbara_q, GaT_kpq, optimize=True)
+                + xp.einsum("ksxj, kkwjs -> xw", rcholbarb_q, GbT_kpq, optimize=True)
+            )
+            # TODO: possibly write a kernel for this
     else:
         for iq in range(len(Sset)):
             iq_real = Sset[iq]
@@ -268,11 +349,14 @@ def kpt_symmchol_ecoul_kernel_batch_uhf_gpu(rchola, rcholb, rcholbara, rcholbarb
             rchola_q = rchola[iq]
             rcholbara_q = rcholbara[iq]
             X[iq] = xp.sqrt(2) * xp.einsum("kixp, kkwip -> xw", rchola_q, Ga_kpq, optimize=True)
-            Xbar[iq] = xp.sqrt(2) * xp.einsum("ksxj, kkwjs -> xw", rcholbara_q, GaT_kpq, optimize=True)
+            Xbar[iq] = xp.sqrt(2) * xp.einsum(
+                "ksxj, kkwjs -> xw", rcholbara_q, GaT_kpq, optimize=True
+            )
 
     ecoul = xp.einsum("qxw, qxw -> w", X, Xbar, optimize=True)
 
     return 0.5 * ecoul / nk
+
 
 def kpt_symmchol_ecoul_kernel_batch_rhf_gpu(rchola, rcholbara, Ghalfa, kpq_mat, Sset, Qplus):
     nwalkers = Ghalfa.shape[2]
@@ -280,8 +364,6 @@ def kpt_symmchol_ecoul_kernel_batch_rhf_gpu(rchola, rcholbara, Ghalfa, kpq_mat, 
     # shape of rchola: (nq, nk, nocc, naux, nbsf) (q, k, gamma, i, p)
     # shape of Ghalf: (nk, nk, nw, nocc, nbsf)
     unique_nq = len(Sset) + len(Qplus)
-    nbsf = rchola.shape[4]
-    nocc = rchola.shape[2]
     naux = rchola.shape[3]
     nk = rchola.shape[1]
     ecoul = xp.zeros((nwalkers), dtype=numpy.complex128)
@@ -294,8 +376,8 @@ def kpt_symmchol_ecoul_kernel_batch_rhf_gpu(rchola, rcholbara, Ghalfa, kpq_mat, 
         GaT_kpq = Ghalfa[ikpq_vec]
         rchola_q = rchola[iq]
         rcholbara_q = rcholbara[iq]
-        X[iq] = 2. * xp.einsum("kixp, kkwip -> xw", rchola_q, Ga_kpq, optimize=True)
-        Xbar[iq] = 2. * xp.einsum("ksxj, kkwjs -> xw", rcholbara_q, GaT_kpq, optimize=True)
+        X[iq] = 2.0 * xp.einsum("kixp, kkwip -> xw", rchola_q, Ga_kpq, optimize=True)
+        Xbar[iq] = 2.0 * xp.einsum("ksxj, kkwjs -> xw", rcholbara_q, GaT_kpq, optimize=True)
 
     for iq in range(len(Sset), unique_nq):
         iq_real = Qplus[iq - len(Sset)]
@@ -304,14 +386,19 @@ def kpt_symmchol_ecoul_kernel_batch_rhf_gpu(rchola, rcholbara, Ghalfa, kpq_mat, 
         GaT_kpq = Ghalfa[ikpq_vec]
         rchola_q = rchola[iq]
         rcholbara_q = rcholbara[iq]
-        X[iq] = xp.sqrt(2) * 2. * xp.einsum("kixp, kkwip -> xw", rchola_q, Ga_kpq, optimize=True)
-        Xbar[iq] = xp.sqrt(2) * 2. * xp.einsum("ksxj, kkwjs -> xw", rcholbara_q, GaT_kpq, optimize=True)
+        X[iq] = xp.sqrt(2) * 2.0 * xp.einsum("kixp, kkwip -> xw", rchola_q, Ga_kpq, optimize=True)
+        Xbar[iq] = (
+            xp.sqrt(2) * 2.0 * xp.einsum("ksxj, kkwjs -> xw", rcholbara_q, GaT_kpq, optimize=True)
+        )
 
     ecoul = xp.einsum("qxw, qxw -> w", X, Xbar, optimize=True)
 
     return 0.5 * ecoul / nk
 
-def kpt_symmchol_exx_kernel_batch_gpu(rchola_chunk, rcholbara_chunk, Ghalfa, kpq_mat, Sset, Qplus, max_mem=4.0):
+
+def kpt_symmchol_exx_kernel_batch_gpu(
+    rchola_chunk, rcholbara_chunk, Ghalfa, kpq_mat, Sset, Qplus, max_mem=4.0
+):
     # shape of rchola: (nq, nk, nocc, naux, nbsf) (q, k, i, gamma, p)
     # shape of rcholbara: (nq, nk, nbsf, naux, nocc) (q, k, p, gamma, i)
     # shape of Ghalf: (nk, nk, nw, nocc, nbsf)
@@ -341,9 +428,11 @@ def kpt_symmchol_exx_kernel_batch_gpu(rchola_chunk, rcholbara_chunk, Ghalfa, kpq
     nkcube_left = len(kcube_Sset)
     if len(kcube_Sset) > 0:
         for i in range(num_nk_chunks_Sset):
+            if nkcube_left <= 0:
+                break
             nk_chunk = min(nkcube_left, nk_chunk_Sset_size)
             nkcube_left -= nk_chunk
-            k_sls = kcube_Sset[i * nk_chunk_Sset_size: i * nk_chunk_Sset_size + nk_chunk]
+            k_sls = kcube_Sset[i * nk_chunk_Sset_size : i * nk_chunk_Sset_size + nk_chunk]
             exx += exx_kpt_kernel(rchola_chunk, rcholbara_chunk, Ghalfa, k_sls, kpq_res_q)
 
     mem_needed = 16 * nwalkers * nocc * nocc * nchol * 2 * nQplus * nk * nk / (1024.0**3.0)
@@ -355,18 +444,21 @@ def kpt_symmchol_exx_kernel_batch_gpu(rchola_chunk, rcholbara_chunk, Ghalfa, kpq
     nkcube_left = len(kcube_Qplus)
     if len(kcube_Qplus) > 0:
         for i in range(num_nk_chunks_Qplus):
+            if nkcube_left <= 0:
+                break
             nk_chunk = min(nkcube_left, nk_chunk_Qplus_size)
             nkcube_left -= nk_chunk
-            k_sls = kcube_Qplus[i * nk_chunk_Qplus_size: i * nk_chunk_Qplus_size + nk_chunk]
-            exx += 2. * exx_kpt_kernel(rchola_chunk, rcholbara_chunk, Ghalfa, k_sls, kpq_res_q)
-    return - 0.5 * exx / nk
+            k_sls = kcube_Qplus[i * nk_chunk_Qplus_size : i * nk_chunk_Qplus_size + nk_chunk]
+            exx += 2.0 * exx_kpt_kernel(rchola_chunk, rcholbara_chunk, Ghalfa, k_sls, kpq_res_q)
+    return -0.5 * exx / nk
+
 
 def local_energy_kpt_single_det_uhf_batch_chunked_gpu(
     system: Generic,
     hamiltonian: KptComplexCholChunked,
     walker_batch: UHFWalkers,
     trial: KptSingleDet,
-    max_mem: float = 4.0
+    max_mem: float = 4.0,
 ):
     """Compute local energy for walker batch (all walkers at once).
 
@@ -417,10 +509,23 @@ def local_energy_kpt_single_det_uhf_batch_chunked_gpu(
         rcholbara_chunk = trial._rcholbara_chunk
 
         ecoul_send = kpt_symmchol_ecoul_kernel_batch_rhf_gpu(
-            rchola_chunk, rcholbara_chunk, ghalfa_send, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus
+            rchola_chunk,
+            rcholbara_chunk,
+            ghalfa_send,
+            hamiltonian.ikpq_mat,
+            hamiltonian.Sset,
+            hamiltonian.Qplus,
         )
 
-        exx_send = 2.0 * kpt_symmchol_exx_kernel_batch_gpu(rchola_chunk, rcholbara_chunk, ghalfa_send, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus, max_mem) 
+        exx_send = 2.0 * kpt_symmchol_exx_kernel_batch_gpu(
+            rchola_chunk,
+            rcholbara_chunk,
+            ghalfa_send,
+            hamiltonian.ikpq_mat,
+            hamiltonian.Sset,
+            hamiltonian.Qplus,
+            max_mem,
+        )
         exx_recv = exx_send.copy()
         ecoul_recv = ecoul_send.copy()
 
@@ -437,15 +542,28 @@ def local_energy_kpt_single_det_uhf_batch_chunked_gpu(
                     handler.scomm.Recv(exx_recv, source=sender, tag=3)
             handler.scomm.barrier()
 
-        # prepare sending
+            # prepare sending
             ecoul_send = ecoul_recv.copy()
             ecoul_send += kpt_symmchol_ecoul_kernel_batch_rhf_gpu(
-            rchola_chunk, rcholbara_chunk, ghalfa_recv, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus
-        )
+                rchola_chunk,
+                rcholbara_chunk,
+                ghalfa_recv,
+                hamiltonian.ikpq_mat,
+                hamiltonian.Sset,
+                hamiltonian.Qplus,
+            )
             exx_send = exx_recv.copy()
-            exx_send += 2.0 * kpt_symmchol_exx_kernel_batch_gpu(rchola_chunk, rcholbara_chunk, ghalfa_recv, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus, max_mem)
+            exx_send += 2.0 * kpt_symmchol_exx_kernel_batch_gpu(
+                rchola_chunk,
+                rcholbara_chunk,
+                ghalfa_recv,
+                hamiltonian.ikpq_mat,
+                hamiltonian.Sset,
+                hamiltonian.Qplus,
+                max_mem,
+            )
             ghalfa_send = ghalfa_recv.copy()
-            
+
         if len(senders) > 1:
             for isend, sender in enumerate(senders):
                 if handler.srank == sender:  # sending 1 xshifted to 0 xshifted_buf
@@ -486,7 +604,6 @@ def local_energy_kpt_single_det_uhf_batch_chunked_gpu(
             ghalfa_recv = xp.zeros_like(ghalfa_send)
             ghalfb_recv = xp.zeros_like(ghalfb_send)
 
-
             handler = walker_batch.mpi_handler
             senders = handler.senders
             receivers = handler.receivers
@@ -497,11 +614,35 @@ def local_energy_kpt_single_det_uhf_batch_chunked_gpu(
             rcholbarb_chunk = trial._rcholbarb_chunk
 
             ecoul_send = kpt_symmchol_ecoul_kernel_batch_uhf_gpu(
-                rchola_chunk, rcholb_chunk, rcholbara_chunk, rcholbarb_chunk, ghalfa_send, ghalfb_send, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus
+                rchola_chunk,
+                rcholb_chunk,
+                rcholbara_chunk,
+                rcholbarb_chunk,
+                ghalfa_send,
+                ghalfb_send,
+                hamiltonian.ikpq_mat,
+                hamiltonian.Sset,
+                hamiltonian.Qplus,
             )
 
-            exx_send = kpt_symmchol_exx_kernel_batch_gpu(rchola_chunk, rcholbara_chunk, ghalfa_send, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus, max_mem) 
-            exx_send += kpt_symmchol_exx_kernel_batch_gpu(rcholb_chunk, rcholbarb_chunk, ghalfb_send, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus, max_mem) 
+            exx_send = kpt_symmchol_exx_kernel_batch_gpu(
+                rchola_chunk,
+                rcholbara_chunk,
+                ghalfa_send,
+                hamiltonian.ikpq_mat,
+                hamiltonian.Sset,
+                hamiltonian.Qplus,
+                max_mem,
+            )
+            exx_send += kpt_symmchol_exx_kernel_batch_gpu(
+                rcholb_chunk,
+                rcholbarb_chunk,
+                ghalfb_send,
+                hamiltonian.ikpq_mat,
+                hamiltonian.Sset,
+                hamiltonian.Qplus,
+                max_mem,
+            )
             exx_recv = exx_send.copy()
             ecoul_recv = ecoul_send.copy()
 
@@ -510,32 +651,50 @@ def local_energy_kpt_single_det_uhf_batch_chunked_gpu(
                     if handler.srank == isend:
                         handler.scomm.Send(ghalfa_send, dest=receivers[isend], tag=1)
                         handler.scomm.Send(ghalfb_send, dest=receivers[isend], tag=2)
-                        # handler.scomm.Send(ghalfaTx_send, dest=receivers[isend], tag=3)
-                        # handler.scomm.Send(ghalfbTx_send, dest=receivers[isend], tag=4)
                         handler.scomm.Send(ecoul_send, dest=receivers[isend], tag=3)
                         handler.scomm.Send(exx_send, dest=receivers[isend], tag=4)
                     elif handler.srank == receivers[isend]:
                         sender = numpy.where(receivers == handler.srank)[0]
                         handler.scomm.Recv(ghalfa_recv, source=sender, tag=1)
                         handler.scomm.Recv(ghalfb_recv, source=sender, tag=2)
-                        # handler.scomm.Recv(ghalfaTx_recv, source=sender, tag=3)
-                        # handler.scomm.Recv(ghalfbTx_recv, source=sender, tag=4)
                         handler.scomm.Recv(ecoul_recv, source=sender, tag=3)
                         handler.scomm.Recv(exx_recv, source=sender, tag=4)
                 handler.scomm.barrier()
 
-            # prepare sending
+                # prepare sending
                 ecoul_send = ecoul_recv.copy()
                 ecoul_send += kpt_symmchol_ecoul_kernel_batch_uhf_gpu(
-                rchola_chunk, rcholb_chunk, rcholbara_chunk, rcholbarb_chunk, ghalfa_recv, ghalfb_recv, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus
-            )
+                    rchola_chunk,
+                    rcholb_chunk,
+                    rcholbara_chunk,
+                    rcholbarb_chunk,
+                    ghalfa_recv,
+                    ghalfb_recv,
+                    hamiltonian.ikpq_mat,
+                    hamiltonian.Sset,
+                    hamiltonian.Qplus,
+                )
                 exx_send = exx_recv.copy()
-                exx_send += kpt_symmchol_exx_kernel_batch_gpu(rchola_chunk, rcholbara_chunk, ghalfa_recv, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus, max_mem)
-                exx_send += kpt_symmchol_exx_kernel_batch_gpu(rcholb_chunk, rcholbarb_chunk, ghalfb_recv, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus, max_mem)
+                exx_send += kpt_symmchol_exx_kernel_batch_gpu(
+                    rchola_chunk,
+                    rcholbara_chunk,
+                    ghalfa_recv,
+                    hamiltonian.ikpq_mat,
+                    hamiltonian.Sset,
+                    hamiltonian.Qplus,
+                    max_mem,
+                )
+                exx_send += kpt_symmchol_exx_kernel_batch_gpu(
+                    rcholb_chunk,
+                    rcholbarb_chunk,
+                    ghalfb_recv,
+                    hamiltonian.ikpq_mat,
+                    hamiltonian.Sset,
+                    hamiltonian.Qplus,
+                    max_mem,
+                )
                 ghalfa_send = ghalfa_recv.copy()
                 ghalfb_send = ghalfb_recv.copy()
-                # ghalfaTx_send = ghalfaTx_recv.copy()
-                # ghalfbTx_send = ghalfbTx_recv.copy()
 
             if len(senders) > 1:
                 for isend, sender in enumerate(senders):
@@ -578,10 +737,26 @@ def local_energy_kpt_single_det_uhf_batch_chunked_gpu(
             rcholbarb_chunk = None
 
             ecoul_send = kpt_symmchol_ecoul_kernel_batch_uhf_gpu(
-                rchola_chunk, rcholb_chunk, rcholbara_chunk, rcholbarb_chunk, ghalfa_send, ghalfb_send, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus
+                rchola_chunk,
+                rcholb_chunk,
+                rcholbara_chunk,
+                rcholbarb_chunk,
+                ghalfa_send,
+                ghalfb_send,
+                hamiltonian.ikpq_mat,
+                hamiltonian.Sset,
+                hamiltonian.Qplus,
             )
 
-            exx_send = kpt_symmchol_exx_kernel_batch_gpu(rchola_chunk, rcholbara_chunk, ghalfa_send, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus, max_mem)
+            exx_send = kpt_symmchol_exx_kernel_batch_gpu(
+                rchola_chunk,
+                rcholbara_chunk,
+                ghalfa_send,
+                hamiltonian.ikpq_mat,
+                hamiltonian.Sset,
+                hamiltonian.Qplus,
+                max_mem,
+            )
             exx_recv = exx_send.copy()
             ecoul_recv = ecoul_send.copy()
 
@@ -598,17 +773,33 @@ def local_energy_kpt_single_det_uhf_batch_chunked_gpu(
                         handler.scomm.Recv(exx_recv, source=sender, tag=4)
                 handler.scomm.barrier()
 
-            # prepare sending
+                # prepare sending
                 ecoul_send = ecoul_recv.copy()
                 ghalfb_recv = None
                 ecoul_send += kpt_symmchol_ecoul_kernel_batch_uhf_gpu(
-                rchola_chunk, rcholb_chunk, rcholbara_chunk, rcholbarb_chunk, ghalfa_recv, ghalfb_recv, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus
-            )
+                    rchola_chunk,
+                    rcholb_chunk,
+                    rcholbara_chunk,
+                    rcholbarb_chunk,
+                    ghalfa_recv,
+                    ghalfb_recv,
+                    hamiltonian.ikpq_mat,
+                    hamiltonian.Sset,
+                    hamiltonian.Qplus,
+                )
                 exx_send = exx_recv.copy()
-                exx_send += kpt_symmchol_exx_kernel_batch_gpu(rchola_chunk, rcholbara_chunk, ghalfa_recv, hamiltonian.ikpq_mat, hamiltonian.Sset, hamiltonian.Qplus, max_mem)
+                exx_send += kpt_symmchol_exx_kernel_batch_gpu(
+                    rchola_chunk,
+                    rcholbara_chunk,
+                    ghalfa_recv,
+                    hamiltonian.ikpq_mat,
+                    hamiltonian.Sset,
+                    hamiltonian.Qplus,
+                    max_mem,
+                )
                 ghalfa_send = ghalfa_recv.copy()
                 ghalfb_send = ghalfb_recv.copy()
-                
+
             if len(senders) > 1:
                 for isend, sender in enumerate(senders):
                     if handler.srank == sender:  # sending 1 xshifted to 0 xshifted_buf

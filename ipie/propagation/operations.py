@@ -14,12 +14,12 @@
 #
 # Authors: Fionn Malone <fionn.malone@gmail.com>
 #          Joonho Lee
+#          Jinghong Zhang <jinghongzhang@fas.harvard.edu>
 #
 from ipie.config import config
 from ipie.utils.backend import arraylib as xp
 from ipie.utils.backend import synchronize
 from ipie.utils.misc import is_cupy
-from numba import jit
 
 # TODO: Rename this
 
@@ -55,19 +55,6 @@ def propagate_one_body(phi, bt2, H1diag=False):
 
     return phi
 
-def propagate_one_body_kpt(phi, bt2):
-    if is_cupy(bt2):
-        phi = xp.einsum("kpr,wkrs->wkps", bt2, phi, optimize=True)
-        return phi
-    else:
-        return propagate_one_body_kpt_cpu(phi, bt2)
-
-@jit(nopython=True, fastmath=True)
-def propagate_one_body_kpt_cpu(phi, bt2):
-    for iw in range(phi.shape[0]):
-        for ik1 in range(bt2.shape[0]):
-            phi[iw][ik1] = xp.dot(bt2[ik1], phi[iw][ik1])
-    return phi
 
 def apply_exponential(phi, VHS, exp_nmax):
     """Apply exponential propagator of the HS transformation
@@ -94,6 +81,7 @@ def apply_exponential(phi, VHS, exp_nmax):
 
     synchronize()
     return phi
+
 
 def apply_exponential_batch(phi, VHS, exp_nmax):
     """Apply exponential propagator of the HS transformation

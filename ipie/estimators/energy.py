@@ -28,18 +28,23 @@ from ipie.estimators.local_energy_noci import local_energy_noci
 from ipie.estimators.local_energy_sd import (
     local_energy_single_det_uhf_batch,
     local_energy_single_det_ghf_batch,
-    local_energy_single_det_isdf_batch_gpu,
 )
-from ipie.estimators.local_energy_sd_chunked import local_energy_single_det_uhf_batch_isdf_chunked_gpu
+from ipie.estimators.local_energy_sd_isdf import local_energy_single_det_isdf_batch_gpu
+from ipie.estimators.local_energy_sd_chunked import (
+    local_energy_single_det_uhf_batch_isdf_chunked_gpu,
+)
 from ipie.estimators.local_energy_wicks import (
     local_energy_multi_det_trial_wicks_batch,
     local_energy_multi_det_trial_wicks_batch_opt,
     local_energy_multi_det_trial_wicks_batch_opt_chunked,
 )
 from ipie.estimators.local_energy_kpt_sd import local_energy_kpt_single_det_uhf
+from ipie.estimators.local_energy_kpt_sd_isdf import local_energy_kpt_single_det_uhf_isdf_gpu
 from ipie.estimators.local_energy_kpt_sd_chunked import local_energy_kpt_single_det_uhf_chunked
-from ipie.hamiltonians.generic import GenericComplexChol, GenericRealChol, GenericRealISDF
-from ipie.hamiltonians.generic_chunked import GenericRealCholChunked, GenericRealISDFChunked
+from ipie.hamiltonians.generic import GenericComplexChol, GenericRealChol
+from ipie.hamiltonians.isdf import GenericRealISDF
+from ipie.hamiltonians.generic_chunked import GenericRealCholChunked
+from ipie.hamiltonians.chunked_isdf import GenericRealISDFChunked
 from ipie.systems.generic import Generic
 from ipie.trial_wavefunction.noci import NOCI
 from ipie.trial_wavefunction.particle_hole import (
@@ -49,16 +54,14 @@ from ipie.trial_wavefunction.particle_hole import (
     ParticleHoleSlow,
 )
 from ipie.trial_wavefunction.single_det_kpt import KptSingleDet
-from ipie.hamiltonians.kpt_hamiltonian import KptComplexChol, KptComplexCholSymm, KptISDF
-from ipie.hamiltonians.kpt_chunked import KptComplexCholChunked 
+from ipie.hamiltonians.kpt_hamiltonian import KptComplexChol, KptComplexCholSymm
+from ipie.hamiltonians.kpt_isdf_hamiltonian import KptISDF
+from ipie.hamiltonians.kpt_chunked import KptComplexCholChunked
 from ipie.walkers.uhf_walkers import UHFWalkers
 from ipie.trial_wavefunction.single_det import SingleDet
 from ipie.trial_wavefunction.single_det_ghf import SingleDetGHF
 from ipie.utils.backend import arraylib as xp
-from ipie.walkers.uhf_walkers import UHFWalkers
 from ipie.walkers.ghf_walkers import GHFWalkers
-
-from ipie.utils.backend import get_device_memory
 
 
 @plum.dispatch
@@ -125,23 +128,32 @@ def local_energy(
 def local_energy(system: Generic, hamiltonian: GenericRealChol, walkers: UHFWalkers, trial: NOCI):
     return local_energy_noci(system, hamiltonian, walkers, trial)
 
-@plum.dispatch
-def local_energy(system: Generic, hamiltonian: KptComplexChol, walkers: UHFWalkers, trial: KptSingleDet):
-    return local_energy_kpt_single_det_uhf(system, hamiltonian, walkers, trial)
-
-@plum.dispatch
-def local_energy(system: Generic, hamiltonian: KptComplexCholSymm, walkers: UHFWalkers, trial: KptSingleDet):
-    return local_energy_kpt_single_det_uhf(system, hamiltonian, walkers, trial)
-
-@plum.dispatch
-def local_energy(system: Generic, hamiltonian: KptComplexCholChunked, walkers: UHFWalkers, trial: KptSingleDet):
-    return local_energy_kpt_single_det_uhf_chunked(system, hamiltonian, walkers, trial)
 
 @plum.dispatch
 def local_energy(
-    system: Generic, hamiltonian: KptISDF, walkers: UHFWalkers, trial: KptSingleDet
+    system: Generic, hamiltonian: KptComplexChol, walkers: UHFWalkers, trial: KptSingleDet
 ):
     return local_energy_kpt_single_det_uhf(system, hamiltonian, walkers, trial)
+
+
+@plum.dispatch
+def local_energy(
+    system: Generic, hamiltonian: KptComplexCholSymm, walkers: UHFWalkers, trial: KptSingleDet
+):
+    return local_energy_kpt_single_det_uhf(system, hamiltonian, walkers, trial)
+
+
+@plum.dispatch
+def local_energy(
+    system: Generic, hamiltonian: KptComplexCholChunked, walkers: UHFWalkers, trial: KptSingleDet
+):
+    return local_energy_kpt_single_det_uhf_chunked(system, hamiltonian, walkers, trial)
+
+
+@plum.dispatch
+def local_energy(system: Generic, hamiltonian: KptISDF, walkers: UHFWalkers, trial: KptSingleDet):
+    return local_energy_kpt_single_det_uhf_isdf_gpu(system, hamiltonian, walkers, trial)
+
 
 @plum.dispatch
 def local_energy(
@@ -156,17 +168,20 @@ def local_energy(
 ):
     return local_energy_single_det_ghf_batch(system, hamiltonian, walkers, trial)
 
+
 @plum.dispatch
 def local_energy(
     system: Generic, hamiltonian: GenericRealISDF, walkers: UHFWalkers, trial: SingleDet
 ):
     return local_energy_single_det_isdf_batch_gpu(system, hamiltonian, walkers, trial)
 
+
 @plum.dispatch
 def local_energy(
     system: Generic, hamiltonian: GenericRealISDFChunked, walkers: UHFWalkers, trial: SingleDet
 ):
     return local_energy_single_det_uhf_batch_isdf_chunked_gpu(system, hamiltonian, walkers, trial)
+
 
 class EnergyEstimator(EstimatorBase):
     def __init__(

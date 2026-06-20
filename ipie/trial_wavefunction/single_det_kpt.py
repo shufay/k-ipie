@@ -1,4 +1,3 @@
-import time
 from typing import Optional, Tuple
 
 import numpy
@@ -6,24 +5,47 @@ import plum
 
 from ipie.config import CommType, config, MPI
 from ipie.estimators.utils import gabk_spin, gabk_spin_nonuniform
-from ipie.hamiltonians.kpt_hamiltonian import KptComplexChol, KptComplexCholSymm, KptISDF
+from ipie.hamiltonians.kpt_hamiltonian import KptComplexChol, KptComplexCholSymm
+from ipie.hamiltonians.kpt_isdf_hamiltonian import KptISDF
 from ipie.hamiltonians.kpt_chunked import KptComplexCholChunked
 from ipie.walkers.uhf_walkers import UHFWalkers
-from ipie.propagation.force_bias import construct_force_bias_kpt_batch_single_det, construct_force_bias_kptsymm_batch_single_det,construct_force_bias_kptisdf_batch_single_det, construct_force_bias_kptsymm_batch_single_det_chunked
-from ipie.trial_wavefunction.half_rotate import half_rotate_generic, half_rotate_chunked, half_rotate_isdf
-from ipie.propagation.overlap import calc_overlap_single_det_kpt
+from ipie.propagation.force_bias import (
+    construct_force_bias_kpt_batch_single_det,
+    construct_force_bias_kptsymm_batch_single_det,
+    construct_force_bias_kptsymm_batch_single_det_chunked,
+)
+from ipie.propagation.force_bias_isdf import construct_force_bias_kptisdf_batch_single_det
+from ipie.trial_wavefunction.half_rotate import (
+    half_rotate_generic,
+    half_rotate_chunked,
+    half_rotate_isdf,
+)
+from ipie.propagation.overlap_kpt import calc_overlap_single_det_kpt
 from ipie.trial_wavefunction.wavefunction_base import TrialWavefunctionBase
-from ipie.estimators.greens_function_kpt_single_det import greens_function_kpt_single_det, greens_function_kpt_single_det_batch
+from ipie.estimators.greens_function_kpt_single_det import (
+    greens_function_kpt_single_det,
+    greens_function_kpt_single_det_batch,
+)
 from ipie.utils.backend import arraylib as xp
 from ipie.utils.mpi import MPIHandler
 from typing import Union
 
 
-# class for UHF trial
+# class for Single Determinant trial wavefunction for k-point calculations
 class KptSingleDet(TrialWavefunctionBase):
-    def __init__(self, wavefunction, nkpts, num_elec, num_basis, handler=MPIHandler(), noccas=None, noccbs=None, verbose=False):
+    def __init__(
+        self,
+        wavefunction,
+        nkpts,
+        num_elec,
+        num_basis,
+        handler=MPIHandler(),
+        noccas=None,
+        noccbs=None,
+        verbose=False,
+    ):
         assert isinstance(wavefunction, numpy.ndarray)
-        assert len(wavefunction.shape) == 3 # nkpts, nbasis, nocc
+        assert len(wavefunction.shape) == 3  # nkpts, nbasis, nocc
         super().__init__(wavefunction, num_elec, num_basis, verbose=verbose)
         if verbose:
             print("# Parsing input options for trial_wavefunction.KptSingleDet.")
@@ -43,10 +65,14 @@ class KptSingleDet(TrialWavefunctionBase):
             self.noccas = noccas
             if noccbs is None:
                 self.noccbs = noccas
-                self.G, self.Ghalf = gabk_spin_nonuniform(self.psi, self.psi, self.nalpha, self.nbeta, noccas, noccas)
+                self.G, self.Ghalf = gabk_spin_nonuniform(
+                    self.psi, self.psi, self.nalpha, self.nbeta, noccas, noccas
+                )
             else:
                 self.noccbs = noccbs
-                self.G, self.Ghalf = gabk_spin_nonuniform(self.psi, self.psi, self.nalpha, self.nbeta, noccas, noccbs)
+                self.G, self.Ghalf = gabk_spin_nonuniform(
+                    self.psi, self.psi, self.nalpha, self.nbeta, noccas, noccbs
+                )
         else:
             self.noccas = None
             self.noccbs = None
@@ -69,26 +95,6 @@ class KptSingleDet(TrialWavefunctionBase):
         raise RuntimeError("Cannot modify number of determinants in SingleDet trial.")
 
     def calculate_energy(self, system, hamiltonian) -> numpy.ndarray:
-        # if self.verbose:
-        #     print("# Computing trial wavefunction energy.")
-        # start = time.time()
-        # # self.e1b = (
-        # #     numpy.sum(self.Ghalf[0] * self._rH1a)
-        # #     + numpy.sum(self.Ghalf[1] * self._rH1b)
-        # #     + hamiltonian.ecore
-        # # )
-        # # self.ej, self.ek = half_rotated_cholesky_jk(
-        # #     system, self.Ghalf[0], self.Ghalf[1], trial=self
-        # # )
-        # # self.e2b = self.ej + self.ek
-        # # self.energy = self.e1b + self.e2b
-
-        # if self.verbose:
-        #     print(
-        #         "# (E, E1B, E2B): (%13.8e, %13.8e, %13.8e)"
-        #         % (self.energy.real, self.e1b.real, self.e2b.real)
-        #     )
-        #     print(f"# Time to evaluate local energy: {time.time() - start} s")
         pass
 
     @plum.dispatch
@@ -167,7 +173,7 @@ class KptSingleDet(TrialWavefunctionBase):
         # grab zeroth element.
         self._rH1a = rot_1body[0][0]
         self._rH1b = rot_1body[1][0] if self.nbeta > 0 else None
-        
+
         self._rchola_chunk = rot_chol[0][0]
         self._rcholb_chunk = rot_chol[1][0] if self.nbeta > 0 else None
         self._rcholbara_chunk = rot_chol[2][0]
@@ -220,7 +226,7 @@ class KptSingleDet(TrialWavefunctionBase):
             raise NotImplementedError
         else:
             return construct_force_bias_kpt_batch_single_det(hamiltonian, walkers, self)
-        
+
     @plum.dispatch
     def calc_force_bias(
         self,
@@ -229,7 +235,9 @@ class KptSingleDet(TrialWavefunctionBase):
         mpi_handler: MPIHandler,
     ) -> Tuple[xp.ndarray, xp.ndarray]:
         if hamiltonian.chunked:
-            return construct_force_bias_kptsymm_batch_single_det_chunked(hamiltonian, walkers, self, mpi_handler)
+            return construct_force_bias_kptsymm_batch_single_det_chunked(
+                hamiltonian, walkers, self, mpi_handler
+            )
         else:
             return construct_force_bias_kptsymm_batch_single_det(hamiltonian, walkers, self)
 
@@ -244,5 +252,3 @@ class KptSingleDet(TrialWavefunctionBase):
             raise NotImplementedError
         else:
             return construct_force_bias_kptisdf_batch_single_det(hamiltonian, walkers, self)
-
-

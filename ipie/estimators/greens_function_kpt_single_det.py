@@ -1,8 +1,25 @@
+# Copyright 2022 The ipie Developers. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Authors: Jinghong Zhang <jinghongzhang@fas.harvard.edu>
+#
+#
+
 from ipie.utils.backend import arraylib as xp
 from ipie.utils.backend import synchronize
-from numba import jit
 import numpy
-import time
+
 
 def greens_function_kpt_single_det(walker_batch, trial, build_full=False):
     """Compute walker's green's function.
@@ -24,7 +41,8 @@ def greens_function_kpt_single_det(walker_batch, trial, build_full=False):
     nk = trial.nk
 
     phia = walker_batch.phia.reshape(walker_batch.nwalkers, nk, nbsf, nk, nup).copy()
-    phib = walker_batch.phib.reshape(walker_batch.nwalkers, nk, nbsf, nk, ndown).copy()
+    if ndown > 0:
+        phib = walker_batch.phib.reshape(walker_batch.nwalkers, nk, nbsf, nk, ndown).copy()
     det = []
     signovlp = []
     logovlp = []
@@ -32,12 +50,14 @@ def greens_function_kpt_single_det(walker_batch, trial, build_full=False):
         ovlpt = numpy.zeros((nk, nup, nk, nup), dtype=numpy.complex128)
         for ik1 in range(nk):
             for ik2 in range(nk):
-                ovlpt[ik1, :, ik2, :] = numpy.dot(phia[iw, ik2, :, ik1, :].T, trial.psi0a[ik2].conj())
+                ovlpt[ik1, :, ik2, :] = numpy.dot(
+                    phia[iw, ik2, :, ik1, :].T, trial.psi0a[ik2].conj()
+                )
         if trial.noccas is not None:
             mask = xp.arange(nup)[None, :] >= xp.array(trial.noccas)[:, None]
             ik_idx, diag_idx = xp.nonzero(mask)
             ovlpt[ik_idx, diag_idx, ik_idx, diag_idx] = 1.0
-        ovlpt = ovlpt.reshape(nk*nup, nk*nup)
+        ovlpt = ovlpt.reshape(nk * nup, nk * nup)
         ovlpinvt = numpy.linalg.inv(ovlpt)
         walker_batch.Ghalfa[iw] = numpy.dot(ovlpinvt, walker_batch.phia[iw].T)
         Ghalfa_reshaped = walker_batch.Ghalfa[iw].reshape(nk, nup, nk, nbsf)
@@ -45,7 +65,9 @@ def greens_function_kpt_single_det(walker_batch, trial, build_full=False):
             Ga = numpy.zeros((nk, nbsf, nk, nbsf), dtype=numpy.complex128)
             for ik1 in range(nk):
                 for ik2 in range(nk):
-                    Ga[ik1, :, ik2, :] = numpy.dot(trial.psi0a[ik1].conj(), Ghalfa_reshaped[iw, ik1, :, ik2, :])
+                    Ga[ik1, :, ik2, :] = numpy.dot(
+                        trial.psi0a[ik1].conj(), Ghalfa_reshaped[iw, ik1, :, ik2, :]
+                    )
             walker_batch.Ga[iw] = Ga.reshape(nk * nbsf, nk * nbsf)
         sign_a, log_ovlp_a = xp.linalg.slogdet(ovlpt)
         sign_b, log_ovlp_b = 1.0, 0.0
@@ -53,12 +75,14 @@ def greens_function_kpt_single_det(walker_batch, trial, build_full=False):
             ovlpt = numpy.zeros((nk, ndown, nk, ndown), dtype=numpy.complex128)
             for ik1 in range(nk):
                 for ik2 in range(nk):
-                    ovlpt[ik1, :, ik2, :] = numpy.dot(phib[iw, ik2, :, ik1, :].T, trial.psi0b[ik2].conj())
+                    ovlpt[ik1, :, ik2, :] = numpy.dot(
+                        phib[iw, ik2, :, ik1, :].T, trial.psi0b[ik2].conj()
+                    )
             if trial.noccbs is not None:
                 mask = xp.arange(ndown)[None, :] >= xp.array(trial.noccbs)[:, None]
                 ik_idx, diag_idx = xp.nonzero(mask)
                 ovlpt[ik_idx, diag_idx, ik_idx, diag_idx] = 1.0
-            ovlpt = ovlpt.reshape(nk*ndown, nk*ndown)
+            ovlpt = ovlpt.reshape(nk * ndown, nk * ndown)
             sign_b, log_ovlp_b = xp.linalg.slogdet(ovlpt)
             ovlpinvt = numpy.linalg.inv(ovlpt)
             walker_batch.Ghalfb[iw] = numpy.dot(ovlpinvt, walker_batch.phib[iw].T)
@@ -67,7 +91,9 @@ def greens_function_kpt_single_det(walker_batch, trial, build_full=False):
                 Gb = numpy.zeros((nk, nbsf, nk, nbsf), dtype=numpy.complex128)
                 for ik1 in range(nk):
                     for ik2 in range(nk):
-                        Gb[iw, ik1, :, ik2, :] = numpy.dot(trial.psi0b[ik1].conj(), Ghalfb_reshaped[iw, ik1, :, ik2, :])
+                        Gb[iw, ik1, :, ik2, :] = numpy.dot(
+                            trial.psi0b[ik1].conj(), Ghalfb_reshaped[iw, ik1, :, ik2, :]
+                        )
                 walker_batch.Gb[iw] = Gb.reshape(nk * nbsf, nk * nbsf)
             det += [sign_a * sign_b * xp.exp(log_ovlp_a + log_ovlp_b - walker_batch.log_shift[iw])]
             signovlp += [sign_a * sign_b]
@@ -124,26 +150,15 @@ def greens_function_kpt_single_det_batch(walker_batch, trial, build_full=False):
     # detect zeros in sign_a, return the index
     mask = xp.isclose(sign_a, 0.0, atol=1e-8)
     zero_indices = xp.where(mask)[0]
-    
-    # # regularize the overlap matrix
-    # if len(zero_indices) > 0:
-    #     for i in zero_indices:
-    #         # add a small value to the diagonal
-    #         ovlp_a[i] += 1e-10 * xp.eye(nk * nup, dtype=ovlp_a.dtype)
 
     walker_batch.Ghalfa = xp.linalg.solve(ovlp_a, walker_batch.phia.transpose(0, 2, 1).copy())
-    # detect if there is nan   
     if len(zero_indices) > 0:
         for i in zero_indices:
             # set Ghalf to zero
             walker_batch.Ghalfa[i, :, :] = 0.0 + 0.0j
-    
-    # ovlp_inv_a = xp.linalg.inv(ovlp_a)
-    # walker_batch.Ghalfa = xp.matmul(ovlp_inv_a, walker_batch.phia.transpose(0, 2, 1))
+
     if not trial.half_rotated or build_full:
-        Ga = xp.einsum(
-            "kpi,wkilq->wkplq", trial.psi0a.conj(), walker_batch.Ghalfa, optimize=True
-        )
+        Ga = xp.einsum("kpi,wkilq->wkplq", trial.psi0a.conj(), walker_batch.Ghalfa, optimize=True)
         walker_batch.Ga = Ga.reshape(walker_batch.nwalkers, nk, nbsf, nk, nbsf)
 
     if ndown > 0 and not walker_batch.rhf:
@@ -157,13 +172,12 @@ def greens_function_kpt_single_det_batch(walker_batch, trial, build_full=False):
         sign_b, log_ovlp_b = xp.linalg.slogdet(ovlp_b)
         mask = xp.isclose(sign_b, 0.0, atol=1e-8)
         zero_indices = xp.where(mask)[0]
-        
-        walker_batch.Ghalfb = xp.linalg.solve(ovlp_b, walker_batch.phib.transpose(0, 2, 1).copy()) 
+
+        walker_batch.Ghalfb = xp.linalg.solve(ovlp_b, walker_batch.phib.transpose(0, 2, 1).copy())
         if len(zero_indices) > 0:
             for i in zero_indices:
                 # set Ghalf to zero
-                walker_batch.Ghalfb[i, :, :] = 0.0 + 0.0j 
-        # walker_batch.Ghalfb = xp.matmul(ovlp_inv_b, walker_batch.phib.transpose(0, 2, 1))
+                walker_batch.Ghalfb[i, :, :] = 0.0 + 0.0j
         if not trial.half_rotated or build_full:
             Gb = xp.einsum(
                 "kpi,wkilq->wkplq", trial.psi0b.conj(), walker_batch.Ghalfb, optimize=True

@@ -17,6 +17,7 @@
 #
 
 """Helper Routines for setting up a calculation"""
+
 # todo : handle more gracefully.
 import json
 
@@ -132,6 +133,7 @@ def get_driver(options: dict, comm: MPI.COMM_WORLD) -> AFQMC:
             num_steps_per_block=qmc.nsteps,
             timestep=qmc.dt,
             num_stblz=qmc.nstblz,
+            pop_control_method=qmc.pop_control_method,
             pop_control_freq=qmc.npop_control,
             rng_seed=qmc.rng_seed,
         )

@@ -21,6 +21,7 @@ import numpy
 from math import ceil, sqrt
 
 from ipie.estimators.local_energy_sd import (
+    ecoul_kernel_batch_real_rchol_rhf,
     ecoul_kernel_batch_real_rchol_uhf,
     exx_kernel_batch_real_rchol,
 )
@@ -28,8 +29,11 @@ from ipie.estimators.kernels import exchange_reduction
 
 from ipie.utils.backend import arraylib as xp
 from ipie.utils.backend import synchronize
-from cuquantum.bindings import cutensornet
-from cuquantum.tensornet import NetworkOptions, contract
+from ipie.utils.cuquantum_backend import (
+    NetworkOptions_optional as NetworkOptions,
+    contract_optional as contract,
+    cutensornet_optional as cutensornet,
+)
 
 # Local energy routies for chunked (distributed) integrals. Distributed here
 # means over MPI processes with information typically residing on different
@@ -64,79 +68,139 @@ def local_energy_single_det_uhf_batch_chunked(system, hamiltonian, walker_batch,
     nalpha = walker_batch.Ghalfa.shape[1]
     nbeta = walker_batch.Ghalfb.shape[1]
     nbasis = hamiltonian.nbasis
+    if walker_batch.rhf:
+        Ghalfa = walker_batch.Ghalfa.reshape(nwalkers, nalpha * nbasis)
 
-    Ghalfa = walker_batch.Ghalfa.reshape(nwalkers, nalpha * nbasis)
-    Ghalfb = walker_batch.Ghalfb.reshape(nwalkers, nbeta * nbasis)
+        e1b = 2.0 * Ghalfa.dot(trial._rH1a.ravel())
+        e1b += hamiltonian.ecore
 
-    e1b = Ghalfa.dot(trial._rH1a.ravel())
-    e1b += Ghalfb.dot(trial._rH1b.ravel())
-    e1b += hamiltonian.ecore
+        Ghalfa_send = Ghalfa.copy()
+        Ghalfa_recv = xp.zeros_like(Ghalfa)
 
-    Ghalfa_send = Ghalfa.copy()
-    Ghalfb_send = Ghalfb.copy()
+        handler = walker_batch.mpi_handler
+        senders = handler.senders
+        receivers = handler.receivers
 
-    Ghalfa_recv = xp.zeros_like(Ghalfa)
-    Ghalfb_recv = xp.zeros_like(Ghalfb)
+        rchola_chunk = trial._rchola_chunk
 
-    handler = walker_batch.mpi_handler
-    senders = handler.senders
-    receivers = handler.receivers
+        Ghalfa = Ghalfa.reshape(nwalkers, nalpha * nbasis)
+        ecoul_send = ecoul_kernel_batch_real_rchol_rhf(rchola_chunk, Ghalfa)
+        Ghalfa = Ghalfa.reshape(nwalkers, nalpha, nbasis)
+        exx_send = 2.0 * exx_kernel_batch_real_rchol(rchola_chunk, Ghalfa)
 
-    rchola_chunk = trial._rchola_chunk
-    rcholb_chunk = trial._rcholb_chunk
+        exx_recv = exx_send.copy()
+        ecoul_recv = ecoul_send.copy()
 
-    Ghalfa = Ghalfa.reshape(nwalkers, nalpha * nbasis)
-    Ghalfb = Ghalfb.reshape(nwalkers, nbeta * nbasis)
-    ecoul_send = ecoul_kernel_batch_real_rchol_uhf(rchola_chunk, rcholb_chunk, Ghalfa, Ghalfb)
-    Ghalfa = Ghalfa.reshape(nwalkers, nalpha, nbasis)
-    Ghalfb = Ghalfb.reshape(nwalkers, nbeta, nbasis)
-    exx_send = exx_kernel_batch_real_rchol(rchola_chunk, Ghalfa)
-    exx_send += exx_kernel_batch_real_rchol(rcholb_chunk, Ghalfb)
+        for _ in range(handler.ssize - 1):
+            for isend, sender in enumerate(senders):
+                if handler.srank == isend:
+                    handler.scomm.Send(Ghalfa_send, dest=receivers[isend], tag=1)
+                    handler.scomm.Send(ecoul_send, dest=receivers[isend], tag=2)
+                    handler.scomm.Send(exx_send, dest=receivers[isend], tag=3)
+                elif handler.srank == receivers[isend]:
+                    idx = numpy.where(receivers == handler.srank)[0]
+                    sender = int(idx.item())
+                    handler.scomm.Recv(Ghalfa_recv, source=sender, tag=1)
+                    handler.scomm.Recv(ecoul_recv, source=sender, tag=2)
+                    handler.scomm.Recv(exx_recv, source=sender, tag=3)
+            handler.scomm.barrier()
 
-    exx_recv = exx_send.copy()
-    ecoul_recv = ecoul_send.copy()
+            # prepare sending
+            ecoul_send = ecoul_recv.copy()
+            Ghalfa_recv = Ghalfa_recv.reshape(nwalkers, nalpha * nbasis)
+            ecoul_send += ecoul_kernel_batch_real_rchol_rhf(rchola_chunk, Ghalfa_recv)
+            Ghalfa_recv = Ghalfa_recv.reshape(nwalkers, nalpha, nbasis)
+            exx_send = exx_recv.copy()
+            exx_send += 2.0 * exx_kernel_batch_real_rchol(rchola_chunk, Ghalfa_recv)
+            Ghalfa_send = Ghalfa_recv.copy()
 
-    for _ in range(handler.ssize - 1):
-        for isend, sender in enumerate(senders):
-            if handler.srank == isend:
-                handler.scomm.Send(Ghalfa_send, dest=receivers[isend], tag=1)
-                handler.scomm.Send(Ghalfb_send, dest=receivers[isend], tag=2)
-                handler.scomm.Send(ecoul_send, dest=receivers[isend], tag=3)
-                handler.scomm.Send(exx_send, dest=receivers[isend], tag=4)
-            elif handler.srank == receivers[isend]:
-                sender = numpy.where(receivers == handler.srank)[0]
-                handler.scomm.Recv(Ghalfa_recv, source=sender, tag=1)
-                handler.scomm.Recv(Ghalfb_recv, source=sender, tag=2)
-                handler.scomm.Recv(ecoul_recv, source=sender, tag=3)
-                handler.scomm.Recv(exx_recv, source=sender, tag=4)
-        handler.scomm.barrier()
+        if len(senders) > 1:
+            for isend, sender in enumerate(senders):
+                if handler.srank == sender:  # sending 1 xshifted to 0 xshifted_buf
+                    handler.scomm.Send(ecoul_send, dest=receivers[isend], tag=1)
+                    handler.scomm.Send(exx_send, dest=receivers[isend], tag=2)
+                elif handler.srank == receivers[isend]:
+                    idx = numpy.where(receivers == handler.srank)[0]
+                    sender = int(idx.item())
+                    handler.scomm.Recv(ecoul_recv, source=sender, tag=1)
+                    handler.scomm.Recv(exx_recv, source=sender, tag=2)
 
-        # prepare sending
-        ecoul_send = ecoul_recv.copy()
-        Ghalfa_recv = Ghalfa_recv.reshape(nwalkers, nalpha * nbasis)
-        Ghalfb_recv = Ghalfb_recv.reshape(nwalkers, nbeta * nbasis)
-        ecoul_send += ecoul_kernel_batch_real_rchol_uhf(
-            rchola_chunk, rcholb_chunk, Ghalfa_recv, Ghalfb_recv
-        )
-        Ghalfa_recv = Ghalfa_recv.reshape(nwalkers, nalpha, nbasis)
-        Ghalfb_recv = Ghalfb_recv.reshape(nwalkers, nbeta, nbasis)
-        exx_send = exx_recv.copy()
-        exx_send += exx_kernel_batch_real_rchol(rchola_chunk, Ghalfa_recv)
-        exx_send += exx_kernel_batch_real_rchol(rcholb_chunk, Ghalfb_recv)
-        Ghalfa_send = Ghalfa_recv.copy()
-        Ghalfb_send = Ghalfb_recv.copy()
+        e2b = ecoul_recv - exx_recv
+    else:
+        Ghalfa = walker_batch.Ghalfa.reshape(nwalkers, nalpha * nbasis)
+        Ghalfb = walker_batch.Ghalfb.reshape(nwalkers, nbeta * nbasis)
 
-    if len(senders) > 1:
-        for isend, sender in enumerate(senders):
-            if handler.srank == sender:  # sending 1 xshifted to 0 xshifted_buf
-                handler.scomm.Send(ecoul_send, dest=receivers[isend], tag=1)
-                handler.scomm.Send(exx_send, dest=receivers[isend], tag=2)
-            elif handler.srank == receivers[isend]:
-                sender = numpy.where(receivers == handler.srank)[0]
-                handler.scomm.Recv(ecoul_recv, source=sender, tag=1)
-                handler.scomm.Recv(exx_recv, source=sender, tag=2)
+        e1b = Ghalfa.dot(trial._rH1a.ravel())
+        e1b += Ghalfb.dot(trial._rH1b.ravel())
+        e1b += hamiltonian.ecore
 
-    e2b = ecoul_recv - exx_recv
+        Ghalfa_send = Ghalfa.copy()
+        Ghalfb_send = Ghalfb.copy()
+
+        Ghalfa_recv = xp.zeros_like(Ghalfa)
+        Ghalfb_recv = xp.zeros_like(Ghalfb)
+
+        handler = walker_batch.mpi_handler
+        senders = handler.senders
+        receivers = handler.receivers
+
+        rchola_chunk = trial._rchola_chunk
+        rcholb_chunk = trial._rcholb_chunk
+
+        Ghalfa = Ghalfa.reshape(nwalkers, nalpha * nbasis)
+        Ghalfb = Ghalfb.reshape(nwalkers, nbeta * nbasis)
+        ecoul_send = ecoul_kernel_batch_real_rchol_uhf(rchola_chunk, rcholb_chunk, Ghalfa, Ghalfb)
+        Ghalfa = Ghalfa.reshape(nwalkers, nalpha, nbasis)
+        Ghalfb = Ghalfb.reshape(nwalkers, nbeta, nbasis)
+        exx_send = exx_kernel_batch_real_rchol(rchola_chunk, Ghalfa)
+        exx_send += exx_kernel_batch_real_rchol(rcholb_chunk, Ghalfb)
+
+        exx_recv = exx_send.copy()
+        ecoul_recv = ecoul_send.copy()
+
+        for _ in range(handler.ssize - 1):
+            for isend, sender in enumerate(senders):
+                if handler.srank == isend:
+                    handler.scomm.Send(Ghalfa_send, dest=receivers[isend], tag=1)
+                    handler.scomm.Send(Ghalfb_send, dest=receivers[isend], tag=2)
+                    handler.scomm.Send(ecoul_send, dest=receivers[isend], tag=3)
+                    handler.scomm.Send(exx_send, dest=receivers[isend], tag=4)
+                elif handler.srank == receivers[isend]:
+                    idx = numpy.where(receivers == handler.srank)[0]
+                    sender = int(idx.item())
+                    handler.scomm.Recv(Ghalfa_recv, source=sender, tag=1)
+                    handler.scomm.Recv(Ghalfb_recv, source=sender, tag=2)
+                    handler.scomm.Recv(ecoul_recv, source=sender, tag=3)
+                    handler.scomm.Recv(exx_recv, source=sender, tag=4)
+            handler.scomm.barrier()
+
+            # prepare sending
+            ecoul_send = ecoul_recv.copy()
+            Ghalfa_recv = Ghalfa_recv.reshape(nwalkers, nalpha * nbasis)
+            Ghalfb_recv = Ghalfb_recv.reshape(nwalkers, nbeta * nbasis)
+            ecoul_send += ecoul_kernel_batch_real_rchol_uhf(
+                rchola_chunk, rcholb_chunk, Ghalfa_recv, Ghalfb_recv
+            )
+            Ghalfa_recv = Ghalfa_recv.reshape(nwalkers, nalpha, nbasis)
+            Ghalfb_recv = Ghalfb_recv.reshape(nwalkers, nbeta, nbasis)
+            exx_send = exx_recv.copy()
+            exx_send += exx_kernel_batch_real_rchol(rchola_chunk, Ghalfa_recv)
+            exx_send += exx_kernel_batch_real_rchol(rcholb_chunk, Ghalfb_recv)
+            Ghalfa_send = Ghalfa_recv.copy()
+            Ghalfb_send = Ghalfb_recv.copy()
+
+        if len(senders) > 1:
+            for isend, sender in enumerate(senders):
+                if handler.srank == sender:  # sending 1 xshifted to 0 xshifted_buf
+                    handler.scomm.Send(ecoul_send, dest=receivers[isend], tag=1)
+                    handler.scomm.Send(exx_send, dest=receivers[isend], tag=2)
+                elif handler.srank == receivers[isend]:
+                    idx = numpy.where(receivers == handler.srank)[0]
+                    sender = int(idx.item())
+                    handler.scomm.Recv(ecoul_recv, source=sender, tag=1)
+                    handler.scomm.Recv(exx_recv, source=sender, tag=2)
+
+        e2b = ecoul_recv - exx_recv
 
     energy = xp.zeros((nwalkers, 3), dtype=numpy.complex128)
     energy[:, 0] = e1b + e2b
@@ -180,6 +244,70 @@ def ecoul_kernel_batch_rchol_uhf_gpu(rchola_chunk, rcholb_chunk, Ghalfa, Ghalfb)
     ecoul += xp.einsum("xw,xw->w", Xb, Xb, optimize=True)
     ecoul += 2.0 * xp.einsum("xw,xw->w", Xa, Xb, optimize=True)
 
+    ecoul *= 0.5
+
+    return ecoul
+
+
+def ecoul_kernel_batch_rchol_rhf_gpu(rchola_chunk, Ghalfa):
+    """Compute coulomb contribution for rchol with RHF trial.
+
+    Parameters
+    ----------
+    rchola_chunk : :class:`numpy.ndarray`
+        Half-rotated cholesky (alpha).
+    rcholb_chunk : :class:`numpy.ndarray`
+        Half-rotated cholesky (beta).
+    Ghalfa : :class:`numpy.ndarray`
+        Walker's half-rotated "green's function" shape is nalpha  x nbasis.
+    Ghalfb : :class:`numpy.ndarray`
+        Walker's half-rotated "green's function" shape is nbeta x nbasis.
+
+    Returns
+    -------
+    ecoul : :class:`numpy.ndarray`
+        coulomb contribution for all walkers.
+    """
+    if xp.isrealobj(rchola_chunk):
+        Xa = rchola_chunk.dot(Ghalfa.real.T) + 1.0j * rchola_chunk.dot(
+            Ghalfa.imag.T
+        )  # naux x nwalkers
+    else:
+        Xa = rchola_chunk.dot(Ghalfa.T)
+
+    ecoul = 4.0 * xp.einsum("xw,xw->w", Xa, Xa, optimize=True)
+    ecoul *= 0.5
+
+    return ecoul
+
+
+def ecoul_kernel_batch_rchol_rhf_gpu(rchola_chunk, Ghalfa):
+    """Compute coulomb contribution for rchol with RHF trial.
+
+    Parameters
+    ----------
+    rchola_chunk : :class:`numpy.ndarray`
+        Half-rotated cholesky (alpha).
+    rcholb_chunk : :class:`numpy.ndarray`
+        Half-rotated cholesky (beta).
+    Ghalfa : :class:`numpy.ndarray`
+        Walker's half-rotated "green's function" shape is nalpha  x nbasis.
+    Ghalfb : :class:`numpy.ndarray`
+        Walker's half-rotated "green's function" shape is nbeta x nbasis.
+
+    Returns
+    -------
+    ecoul : :class:`numpy.ndarray`
+        coulomb contribution for all walkers.
+    """
+    if xp.isrealobj(rchola_chunk):
+        Xa = rchola_chunk.dot(Ghalfa.real.T) + 1.0j * rchola_chunk.dot(
+            Ghalfa.imag.T
+        )  # naux x nwalkers
+    else:
+        Xa = rchola_chunk.dot(Ghalfa.T)
+
+    ecoul = 4.0 * xp.einsum("xw,xw->w", Xa, Xa, optimize=True)
     ecoul *= 0.5
 
     return ecoul
@@ -267,89 +395,160 @@ def local_energy_single_det_uhf_batch_chunked_gpu(
     nbeta = walker_batch.Ghalfb.shape[1]
     nbasis = hamiltonian.nbasis
 
-    Ghalfa = walker_batch.Ghalfa.reshape(nwalkers, nalpha * nbasis)
-    Ghalfb = walker_batch.Ghalfb.reshape(nwalkers, nbeta * nbasis)
+    if walker_batch.rhf:
+        Ghalfa = walker_batch.Ghalfa.reshape(nwalkers, nalpha * nbasis)
 
-    e1b = Ghalfa.dot(trial._rH1a.ravel())
-    e1b += Ghalfb.dot(trial._rH1b.ravel())
-    e1b += hamiltonian.ecore
+        e1b = 2.0 * Ghalfa.dot(trial._rH1a.ravel())
+        e1b += hamiltonian.ecore
 
-    Ghalfa_send = Ghalfa.copy()
-    Ghalfb_send = Ghalfb.copy()
+        Ghalfa_send = Ghalfa.copy()
 
-    Ghalfa_recv = xp.zeros_like(Ghalfa)
-    Ghalfb_recv = xp.zeros_like(Ghalfb)
+        Ghalfa_recv = xp.zeros_like(Ghalfa)
 
-    handler = walker_batch.mpi_handler
-    receivers = handler.receivers
+        handler = walker_batch.mpi_handler
+        receivers = handler.receivers
 
-    rchola_chunk = trial._rchola_chunk
-    rcholb_chunk = trial._rcholb_chunk
+        rchola_chunk = trial._rchola_chunk
 
-    # buffer for low on GPU memory usage
-    max_nchol = max(trial._rchola_chunk.shape[0], trial._rcholb_chunk.shape[0])
-    max_nocc = max(nalpha, nbeta)
-    mem_needed = 16 * nwalkers * max_nocc * max_nocc * max_nchol / (1024.0**3.0)
-    num_chunks = max(1, ceil(mem_needed / max_mem))
-    chunk_size = ceil(max_nchol / num_chunks)
-    buff = xp.zeros(shape=(chunk_size, nwalkers * max_nocc * max_nocc), dtype=numpy.complex128)
+        # buffer for low on GPU memory usage
+        max_nchol = max(trial._rchola_chunk.shape[0], trial._rcholb_chunk.shape[0])
+        max_nocc = max(nalpha, nbeta)
+        mem_needed = 16 * nwalkers * max_nocc * max_nocc * max_nchol / (1024.0**3.0)
+        num_chunks = max(1, ceil(mem_needed / max_mem))
+        chunk_size = ceil(max_nchol / num_chunks)
+        buff = xp.zeros(shape=(chunk_size, nwalkers * max_nocc * max_nocc), dtype=numpy.complex128)
 
-    Ghalfa = Ghalfa.reshape(nwalkers, nalpha * nbasis)
-    Ghalfb = Ghalfb.reshape(nwalkers, nbeta * nbasis)
-    ecoul_send = ecoul_kernel_batch_rchol_uhf_gpu(rchola_chunk, rcholb_chunk, Ghalfa, Ghalfb)
-    Ghalfa = Ghalfa.reshape(nwalkers, nalpha, nbasis)
-    Ghalfb = Ghalfb.reshape(nwalkers, nbeta, nbasis)
-    exx_send = exx_kernel_batch_rchol_gpu_low_mem(rchola_chunk, Ghalfa, buff)
-    exx_send += exx_kernel_batch_rchol_gpu_low_mem(rcholb_chunk, Ghalfb, buff)
+        Ghalfa = Ghalfa.reshape(nwalkers, nalpha * nbasis)
+        ecoul_send = ecoul_kernel_batch_rchol_rhf_gpu(rchola_chunk, Ghalfa)
+        Ghalfa = Ghalfa.reshape(nwalkers, nalpha, nbasis)
+        exx_send = 2.0 * exx_kernel_batch_rchol_gpu_low_mem(rchola_chunk, Ghalfa, buff)
 
-    exx_recv = exx_send.copy()
-    ecoul_recv = ecoul_send.copy()
+        exx_recv = exx_send.copy()
+        ecoul_recv = ecoul_send.copy()
 
-    srank = handler.srank
+        srank = handler.srank
 
-    sender = numpy.where(receivers == handler.srank)[0]
-    scomm = handler.scomm
-    for _ in range(handler.ssize - 1):
+        idx = numpy.where(receivers == handler.srank)[0]
+        sender = int(idx.item())
+        scomm = handler.scomm
+        for _ in range(handler.ssize - 1):
+            synchronize()
+            scomm.Isend(Ghalfa_send, dest=receivers[srank], tag=1)
+            scomm.Isend(ecoul_send, dest=receivers[srank], tag=2)
+            scomm.Isend(exx_send, dest=receivers[srank], tag=3)
+            req1 = scomm.Irecv(Ghalfa_recv, source=sender, tag=1)
+            req2 = scomm.Irecv(ecoul_recv, source=sender, tag=2)
+            req3 = scomm.Irecv(exx_recv, source=sender, tag=3)
+            req1.wait()
+            req2.wait()
+            req3.wait()
+            scomm.barrier()
+
+            # prepare sending
+            ecoul_send = ecoul_recv.copy()
+            Ghalfa_recv = Ghalfa_recv.reshape(nwalkers, nalpha * nbasis)
+            ecoul_send += ecoul_kernel_batch_rchol_rhf_gpu(rchola_chunk, Ghalfa_recv)
+            Ghalfa_recv = Ghalfa_recv.reshape(nwalkers, nalpha, nbasis)
+            exx_send = exx_recv.copy()
+            exx_send += 2.0 * exx_kernel_batch_rchol_gpu_low_mem(rchola_chunk, Ghalfa_recv, buff)
+            Ghalfa_send = Ghalfa_recv.copy()
+
         synchronize()
-        scomm.Isend(Ghalfa_send, dest=receivers[srank], tag=1)
-        scomm.Isend(Ghalfb_send, dest=receivers[srank], tag=2)
-        scomm.Isend(ecoul_send, dest=receivers[srank], tag=3)
-        scomm.Isend(exx_send, dest=receivers[srank], tag=4)
-        req1 = scomm.Irecv(Ghalfa_recv, source=sender, tag=1)
-        req2 = scomm.Irecv(Ghalfb_recv, source=sender, tag=2)
-        req3 = scomm.Irecv(ecoul_recv, source=sender, tag=3)
-        req4 = scomm.Irecv(exx_recv, source=sender, tag=4)
+        scomm.Isend(ecoul_send, dest=receivers[srank], tag=1)
+        scomm.Isend(exx_send, dest=receivers[srank], tag=2)
+        req1 = scomm.Irecv(ecoul_recv, source=sender, tag=1)
+        req2 = scomm.Irecv(exx_recv, source=sender, tag=2)
         req1.wait()
         req2.wait()
-        req3.wait()
-        req4.wait()
-        scomm.barrier()
+        handler.scomm.barrier()
 
-        # prepare sending
-        ecoul_send = ecoul_recv.copy()
-        Ghalfa_recv = Ghalfa_recv.reshape(nwalkers, nalpha * nbasis)
-        Ghalfb_recv = Ghalfb_recv.reshape(nwalkers, nbeta * nbasis)
-        ecoul_send += ecoul_kernel_batch_rchol_uhf_gpu(
-            rchola_chunk, rcholb_chunk, Ghalfa_recv, Ghalfb_recv
-        )
-        Ghalfa_recv = Ghalfa_recv.reshape(nwalkers, nalpha, nbasis)
-        Ghalfb_recv = Ghalfb_recv.reshape(nwalkers, nbeta, nbasis)
-        exx_send = exx_recv.copy()
-        exx_send += exx_kernel_batch_rchol_gpu_low_mem(rchola_chunk, Ghalfa_recv, buff)
-        exx_send += exx_kernel_batch_rchol_gpu_low_mem(rcholb_chunk, Ghalfb_recv, buff)
-        Ghalfa_send = Ghalfa_recv.copy()
-        Ghalfb_send = Ghalfb_recv.copy()
+        e2b = ecoul_recv - exx_recv
 
-    synchronize()
-    scomm.Isend(ecoul_send, dest=receivers[srank], tag=1)
-    scomm.Isend(exx_send, dest=receivers[srank], tag=2)
-    req1 = scomm.Irecv(ecoul_recv, source=sender, tag=1)
-    req2 = scomm.Irecv(exx_recv, source=sender, tag=2)
-    req1.wait()
-    req2.wait()
-    handler.scomm.barrier()
+    else:
+        Ghalfa = walker_batch.Ghalfa.reshape(nwalkers, nalpha * nbasis)
+        Ghalfb = walker_batch.Ghalfb.reshape(nwalkers, nbeta * nbasis)
 
-    e2b = ecoul_recv - exx_recv
+        e1b = Ghalfa.dot(trial._rH1a.ravel())
+        e1b += Ghalfb.dot(trial._rH1b.ravel())
+        e1b += hamiltonian.ecore
+
+        Ghalfa_send = Ghalfa.copy()
+        Ghalfb_send = Ghalfb.copy()
+
+        Ghalfa_recv = xp.zeros_like(Ghalfa)
+        Ghalfb_recv = xp.zeros_like(Ghalfb)
+
+        handler = walker_batch.mpi_handler
+        receivers = handler.receivers
+
+        rchola_chunk = trial._rchola_chunk
+        rcholb_chunk = trial._rcholb_chunk
+
+        # buffer for low on GPU memory usage
+        max_nchol = max(trial._rchola_chunk.shape[0], trial._rcholb_chunk.shape[0])
+        max_nocc = max(nalpha, nbeta)
+        mem_needed = 16 * nwalkers * max_nocc * max_nocc * max_nchol / (1024.0**3.0)
+        num_chunks = max(1, ceil(mem_needed / max_mem))
+        chunk_size = ceil(max_nchol / num_chunks)
+        buff = xp.zeros(shape=(chunk_size, nwalkers * max_nocc * max_nocc), dtype=numpy.complex128)
+
+        Ghalfa = Ghalfa.reshape(nwalkers, nalpha * nbasis)
+        Ghalfb = Ghalfb.reshape(nwalkers, nbeta * nbasis)
+        ecoul_send = ecoul_kernel_batch_rchol_uhf_gpu(rchola_chunk, rcholb_chunk, Ghalfa, Ghalfb)
+        Ghalfa = Ghalfa.reshape(nwalkers, nalpha, nbasis)
+        Ghalfb = Ghalfb.reshape(nwalkers, nbeta, nbasis)
+        exx_send = exx_kernel_batch_rchol_gpu_low_mem(rchola_chunk, Ghalfa, buff)
+        exx_send += exx_kernel_batch_rchol_gpu_low_mem(rcholb_chunk, Ghalfb, buff)
+
+        exx_recv = exx_send.copy()
+        ecoul_recv = ecoul_send.copy()
+
+        srank = handler.srank
+
+        idx = numpy.where(receivers == handler.srank)[0]
+        sender = int(idx.item())
+        scomm = handler.scomm
+        for _ in range(handler.ssize - 1):
+            synchronize()
+            scomm.Isend(Ghalfa_send, dest=receivers[srank], tag=1)
+            scomm.Isend(Ghalfb_send, dest=receivers[srank], tag=2)
+            scomm.Isend(ecoul_send, dest=receivers[srank], tag=3)
+            scomm.Isend(exx_send, dest=receivers[srank], tag=4)
+            req1 = scomm.Irecv(Ghalfa_recv, source=sender, tag=1)
+            req2 = scomm.Irecv(Ghalfb_recv, source=sender, tag=2)
+            req3 = scomm.Irecv(ecoul_recv, source=sender, tag=3)
+            req4 = scomm.Irecv(exx_recv, source=sender, tag=4)
+            req1.wait()
+            req2.wait()
+            req3.wait()
+            req4.wait()
+            scomm.barrier()
+
+            # prepare sending
+            ecoul_send = ecoul_recv.copy()
+            Ghalfa_recv = Ghalfa_recv.reshape(nwalkers, nalpha * nbasis)
+            Ghalfb_recv = Ghalfb_recv.reshape(nwalkers, nbeta * nbasis)
+            ecoul_send += ecoul_kernel_batch_rchol_uhf_gpu(
+                rchola_chunk, rcholb_chunk, Ghalfa_recv, Ghalfb_recv
+            )
+            Ghalfa_recv = Ghalfa_recv.reshape(nwalkers, nalpha, nbasis)
+            Ghalfb_recv = Ghalfb_recv.reshape(nwalkers, nbeta, nbasis)
+            exx_send = exx_recv.copy()
+            exx_send += exx_kernel_batch_rchol_gpu_low_mem(rchola_chunk, Ghalfa_recv, buff)
+            exx_send += exx_kernel_batch_rchol_gpu_low_mem(rcholb_chunk, Ghalfb_recv, buff)
+            Ghalfa_send = Ghalfa_recv.copy()
+            Ghalfb_send = Ghalfb_recv.copy()
+
+        synchronize()
+        scomm.Isend(ecoul_send, dest=receivers[srank], tag=1)
+        scomm.Isend(exx_send, dest=receivers[srank], tag=2)
+        req1 = scomm.Irecv(ecoul_recv, source=sender, tag=1)
+        req2 = scomm.Irecv(exx_recv, source=sender, tag=2)
+        req1.wait()
+        req2.wait()
+        handler.scomm.barrier()
+
+        e2b = ecoul_recv - exx_recv
 
     energy = xp.zeros((nwalkers, 3), dtype=numpy.complex128)
     energy[:, 0] = e1b + e2b
@@ -360,13 +559,14 @@ def local_energy_single_det_uhf_batch_chunked_gpu(
 
     return energy
 
+
 def ecoul_kernel_batch_real_isdf_chunk_rhf_gpu(cholM_chunk, halfrot_cgtoa, cgto, Ghalfa_batch):
     nwalkers = Ghalfa_batch.shape[0]
     nisdf = cholM_chunk.shape[0]
     ecoul = xp.zeros(nwalkers, dtype=numpy.complex128)
     intermediate_mem = nisdf * nisdf * 16
     mem_limit = 0.3 * xp.cuda.Device().mem_info[0]
-    num_chunks = max(1, ceil(sqrt(intermediate_mem/ mem_limit)))
+    num_chunks = max(1, ceil(sqrt(intermediate_mem / mem_limit)))
     chunk_size = ceil(nisdf / num_chunks)
     nisdfx_left = nisdf
     slices_x = []
@@ -378,7 +578,9 @@ def ecoul_kernel_batch_real_isdf_chunk_rhf_gpu(cholM_chunk, halfrot_cgtoa, cgto,
         slices_x.append(slice(i_chunk * chunk_size, i_chunk * chunk_size + nx_chunk))
     handle = cutensornet.create()
     network_opts = NetworkOptions(handle=handle)
-    v_wP = 2. * contract('Pi, Pp, wip -> wP', halfrot_cgtoa, cgto, Ghalfa_batch, options=network_opts)
+    v_wP = 2.0 * contract(
+        "Pi, Pp, wip -> wP", halfrot_cgtoa, cgto, Ghalfa_batch, options=network_opts
+    )
     for slicex in slices_x:
         v_wP_chunkx = v_wP[:, slicex].copy()
         for slicey in slices_x:
@@ -386,15 +588,18 @@ def ecoul_kernel_batch_real_isdf_chunk_rhf_gpu(cholM_chunk, halfrot_cgtoa, cgto,
             MPQ = cholM_chunk[slicey] @ cholM_chunk[slicex].T
             ecoul += xp.sum((v_wP_chunky @ MPQ) * v_wP_chunkx, axis=1)
     cutensornet.destroy(handle)
-    return .5 * ecoul
+    return 0.5 * ecoul
 
-def ecoul_kernel_batch_real_isdf_chunk_uhf_gpu(cholM_chunk, halfrot_cgtoa, halfrot_cgtob, cgto, Ghalfa_batch, Ghalfb_batch):
+
+def ecoul_kernel_batch_real_isdf_chunk_uhf_gpu(
+    cholM_chunk, halfrot_cgtoa, halfrot_cgtob, cgto, Ghalfa_batch, Ghalfb_batch
+):
     nwalkers = Ghalfa_batch.shape[0]
     nisdf = cholM_chunk.shape[0]
     ecoul = xp.zeros(nwalkers, dtype=numpy.complex128)
     intermediate_mem = nisdf * nisdf * 16
     mem_limit = 0.3 * xp.cuda.Device().mem_info[0]
-    num_chunks = max(1, ceil(sqrt(intermediate_mem/ mem_limit)))
+    num_chunks = max(1, ceil(sqrt(intermediate_mem / mem_limit)))
     chunk_size = ceil(nisdf / num_chunks)
     nisdfx_left = nisdf
     slices_x = []
@@ -406,8 +611,12 @@ def ecoul_kernel_batch_real_isdf_chunk_uhf_gpu(cholM_chunk, halfrot_cgtoa, halfr
         slices_x.append(slice(i_chunk * chunk_size, i_chunk * chunk_size + nx_chunk))
     handle = cutensornet.create()
     network_opts = NetworkOptions(handle=handle)
-    v_wP_real = contract('Pi, Pp, wip -> wP', halfrot_cgtoa, cgto, Ghalfa_batch.real, options=network_opts) + contract('Pi, Pp, wip -> wP', halfrot_cgtob, cgto, Ghalfb_batch.real, options=network_opts)
-    v_wP_imag = contract('Pi, Pp, wip -> wP', halfrot_cgtoa, cgto, Ghalfa_batch.imag, options=network_opts) + contract('Pi, Pp, wip -> wP', halfrot_cgtob, cgto, Ghalfb_batch.imag, options=network_opts)
+    v_wP_real = contract(
+        "Pi, Pp, wip -> wP", halfrot_cgtoa, cgto, Ghalfa_batch.real, options=network_opts
+    ) + contract("Pi, Pp, wip -> wP", halfrot_cgtob, cgto, Ghalfb_batch.real, options=network_opts)
+    v_wP_imag = contract(
+        "Pi, Pp, wip -> wP", halfrot_cgtoa, cgto, Ghalfa_batch.imag, options=network_opts
+    ) + contract("Pi, Pp, wip -> wP", halfrot_cgtob, cgto, Ghalfb_batch.imag, options=network_opts)
     v_wP = xp.zeros_like(v_wP_real, dtype=xp.complex128)
     v_wP.real = v_wP_real
     v_wP.imag = v_wP_imag
@@ -418,7 +627,8 @@ def ecoul_kernel_batch_real_isdf_chunk_uhf_gpu(cholM_chunk, halfrot_cgtoa, halfr
             MPQ = cholM_chunk[slicey] @ cholM_chunk[slicex].T
             ecoul += xp.sum((v_wP_chunky @ MPQ) * v_wP_chunkx, axis=1)
     cutensornet.destroy(handle)
-    return .5 * ecoul
+    return 0.5 * ecoul
+
 
 def exx_kernel_batch_real_isdf_chunk_uhf_gpu(cholM_chunk, halfrot_cgtoa, cgto, Ghalfa_batch):
     nwalkers = Ghalfa_batch.shape[0]
@@ -426,7 +636,7 @@ def exx_kernel_batch_real_isdf_chunk_uhf_gpu(cholM_chunk, halfrot_cgtoa, cgto, G
     nisdf = cholM_chunk.shape[0]
     intermediate_mem = nwalkers * nisdf * nisdf * 16 * 2
     mem_limit = 0.3 * xp.cuda.Device().mem_info[0]
-    num_chunks = max(1, ceil(sqrt(intermediate_mem/ mem_limit)))
+    num_chunks = max(1, ceil(sqrt(intermediate_mem / mem_limit)))
     chunk_size = ceil(nisdf / num_chunks)
     nisdfx_left = nisdf
     slices_x = []
@@ -457,11 +667,10 @@ def exx_kernel_batch_real_isdf_chunk_uhf_gpu(cholM_chunk, halfrot_cgtoa, cgto, G
             TQP_chunk = TQP_chunk.reshape(nwalkers, len_slicex * len_slicey)
             contrib = xp.sum(TPQ_chunk * TQP_chunk * MPQ_chunk[xp.newaxis, :], axis=1)
             exx += contrib
-    return .5 * exx
+    return 0.5 * exx
 
-def local_energy_single_det_uhf_batch_isdf_chunked_gpu(
-    system, hamiltonian, walker_batch, trial
-):
+
+def local_energy_single_det_uhf_batch_isdf_chunked_gpu(system, hamiltonian, walker_batch, trial):
     """Compute local energy for walker batch (all walkers at once).
 
     Single determinant case, GPU, chunked integrals.
@@ -507,15 +716,26 @@ def local_energy_single_det_uhf_batch_isdf_chunked_gpu(
 
         handler = walker_batch.mpi_handler
         receivers = handler.receivers
-    
+
         ecoul_send = ecoul_kernel_batch_real_isdf_chunk_uhf_gpu(
-            hamiltonian.cholM_chunk, trial._rcgtoa, trial._rcgtob, hamiltonian.cgto, Ghalfa_send, Ghalfb_send
+            hamiltonian.cholM_chunk,
+            trial._rcgtoa,
+            trial._rcgtob,
+            hamiltonian.cgto,
+            Ghalfa_send,
+            Ghalfb_send,
         )
         exx_send = exx_kernel_batch_real_isdf_chunk_uhf_gpu(
-            hamiltonian.cholM_chunk, trial._rcgtoa, hamiltonian.cgto, Ghalfa_send,
+            hamiltonian.cholM_chunk,
+            trial._rcgtoa,
+            hamiltonian.cgto,
+            Ghalfa_send,
         )
         exx_send += exx_kernel_batch_real_isdf_chunk_uhf_gpu(
-            hamiltonian.cholM_chunk, trial._rcgtob, hamiltonian.cgto, Ghalfb_send,
+            hamiltonian.cholM_chunk,
+            trial._rcgtob,
+            hamiltonian.cgto,
+            Ghalfb_send,
         )
         exx_recv = exx_send.copy()
         ecoul_recv = ecoul_send.copy()
@@ -543,14 +763,25 @@ def local_energy_single_det_uhf_batch_isdf_chunked_gpu(
             # prepare sending
             ecoul_send = ecoul_recv.copy()
             ecoul_send += ecoul_kernel_batch_real_isdf_chunk_uhf_gpu(
-                hamiltonian.cholM_chunk, trial._rcgtoa, trial._rcgtob, hamiltonian.cgto, Ghalfa_recv, Ghalfb_recv
+                hamiltonian.cholM_chunk,
+                trial._rcgtoa,
+                trial._rcgtob,
+                hamiltonian.cgto,
+                Ghalfa_recv,
+                Ghalfb_recv,
             )
             exx_send = exx_recv.copy()
             exx_send += exx_kernel_batch_real_isdf_chunk_uhf_gpu(
-                hamiltonian.cholM_chunk, trial._rcgtoa, hamiltonian.cgto, Ghalfa_recv,
+                hamiltonian.cholM_chunk,
+                trial._rcgtoa,
+                hamiltonian.cgto,
+                Ghalfa_recv,
             )
             exx_send += exx_kernel_batch_real_isdf_chunk_uhf_gpu(
-                hamiltonian.cholM_chunk, trial._rcgtob, hamiltonian.cgto, Ghalfb_recv,
+                hamiltonian.cholM_chunk,
+                trial._rcgtob,
+                hamiltonian.cgto,
+                Ghalfb_recv,
             )
             Ghalfa_send = Ghalfa_recv.copy()
             Ghalfb_send = Ghalfb_recv.copy()

@@ -14,9 +14,11 @@
 #
 # Authors: Fionn Malone <fmalone@google.com>
 #          Joonho Lee <linusjoonho@gmail.com>
+#          Jinghong Zhang <jinghongzhang@fas.harvard.edu>
 #
 
 """Driver to perform AFQMC calculation"""
+
 import abc
 import json
 import time
@@ -25,7 +27,6 @@ import math
 from typing import Dict, Optional, Tuple
 
 
-from ipie.utils.backend import get_device_memory
 from ipie.config import config
 from ipie.estimators.estimator_base import EstimatorBase
 from ipie.estimators.handler import EstimatorHandler
@@ -58,7 +59,7 @@ class AFQMCBase(metaclass=abc.ABCMeta):
         propagator,
         mpi_handler,
         params: QMCParams,
-        eq_propagator = None,
+        eq_propagator=None,
         verbose: int = 0,
     ):
         self.system = system
@@ -66,7 +67,7 @@ class AFQMCBase(metaclass=abc.ABCMeta):
         self.trial = trial
         self.walkers = walkers
         self.propagator = propagator
-        self.eq_propagator = eq_propagator
+        self.eq_propagator = eq_propagator if eq_propagator is not None else propagator
         self.mpi_handler = mpi_handler  # mpi_handler should be passed into here
         self.shared_comm = self.mpi_handler.shared_comm
         self.verbose = verbose
@@ -81,6 +82,7 @@ class AFQMCBase(metaclass=abc.ABCMeta):
         walkers=None,
         estimator_filename=None,
         verbose=True,
+        discard_weights_aftereq=False,
         additional_estimators: Optional[Dict[str, EstimatorBase]] = None,
     ):
         """Code to run the AFQMC calculation."""
@@ -293,11 +295,19 @@ class AFQMC(AFQMCBase):
         propagator,
         mpi_handler,
         params: QMCParams,
-        eq_propagator = None,
+        eq_propagator=None,
         verbose: int = 0,
     ):
         super().__init__(
-            system, hamiltonian, trial, walkers, propagator, mpi_handler, params, eq_propagator, verbose
+            system,
+            hamiltonian,
+            trial,
+            walkers,
+            propagator,
+            mpi_handler,
+            params,
+            eq_propagator,
+            verbose,
         )
 
     @staticmethod
@@ -314,13 +324,17 @@ class AFQMC(AFQMCBase):
         timestep: float = 0.005,
         stabilize_freq=5,
         eq_stabilize_freq=2,
+        pop_control_method="pair_branch",
         pop_control_freq=5,
         eq_pop_control_freq=2,
-        eq_timestep = None,
-        eq_num_steps_per_block = None,
-        num_eq_blocks: int = 50,
+        eq_timestep=None,
+        eq_num_steps_per_block=None,
+        num_eq_blocks: int = 0,
         ene_bound_const: float = 2.0,
         fb_bound: float = 1.0,
+        correlated_samp: bool = False,
+        reference_run: bool = False,
+        walkermap_filepath: Optional[str] = None,
         verbose=True,
         mpi_handler=None,
     ) -> "AFQMC":
@@ -345,12 +359,34 @@ class AFQMC(AFQMCBase):
                 num_steps_per_block.
         timestep : float
             Imaginary timestep. Default 0.005.
-        stabilize_freq : float
+        stabilize_freq : int
             Frequency at which to perform QR factorization of walkers (in units
-                of steps.) Default 25.
+                of steps.) Default 5.
+        eq_stabilize_freq : int
+            Frequency at which to perform QR factorization of walkers during equilibration (in units
+                of steps.) Default 2.
         pop_control_freq : int
             Frequency at which to perform population control (in units of
-                steps.) Default 25.
+                steps.) Default 5.
+        eq_pop_control_freq : int
+            Frequency at which to perform population control during equilibration (in units of
+                steps.) Default 2.
+        eq_timestep : float
+            Imaginary timestep to use during equilibration. Default None (use same as timestep).
+        eq_num_steps_per_block : int
+            Number of Monte Carlo steps before estimators are evaluatied during equilibration. Default None (use same as num_steps_per_block).
+        num_eq_blocks : int
+            Number of blocks to perform during equilibration. Total number of steps = num_eq_blocks * eq_num_steps_per_block. Default 50.
+        ene_bound_const : float
+            Constant to determine local energy bound.
+        fb_bound : float
+            Constant to determine force bias bound.
+        correlated_samp : bool
+            Whether to use correlated sampling for population control. Default False.
+        reference_run : bool
+            Whether this is a reference run (i.e. generating the reference population control decisions for the sample runs in correlated sampling). Default False.
+        walkermap_filepath : str
+            Filepath to write walkermap (the population control decisions) to. If None, do not write walkermap. Default None, only write walkermap if this is a reference run.
         verbose : bool
             Log verbosity. Default True i.e. print information to stdout.
         """
@@ -366,6 +402,7 @@ class AFQMC(AFQMCBase):
             num_steps_per_block=num_steps_per_block,
             timestep=timestep,
             num_stblz=stabilize_freq,
+            pop_control_method=pop_control_method,
             num_eq_stblz=eq_stabilize_freq,
             pop_control_freq=pop_control_freq,
             eq_pop_control_freq=eq_pop_control_freq,
@@ -374,7 +411,10 @@ class AFQMC(AFQMCBase):
             eq_num_steps_per_block=eq_num_steps_per_block,
             num_eq_blocks=num_eq_blocks,
             fb_bound=fb_bound,
-            ene_bound_const=ene_bound_const
+            ene_bound_const=ene_bound_const,
+            correlated_samp=correlated_samp,
+            reference_run=reference_run,
+            walkermap_filepath=walkermap_filepath,
         )
         # 2. Calculation objects.
         system = Generic(num_elec)
@@ -400,10 +440,14 @@ class AFQMC(AFQMCBase):
                 trial_wavefunction
             )  # any intermediates that require information from trial_wavefunction
         # TODO: this is a factory not a class
-        propagator = Propagator[type(hamiltonian)](params.timestep, params.ene_bound_const, params.fb_bound)
+        propagator = Propagator[type(hamiltonian)](
+            params.timestep, params.ene_bound_const, params.fb_bound
+        )
         propagator.build(hamiltonian, trial_wavefunction, walkers, mpi_handler)
         if not math.isclose(params.timestep, params.eq_timestep, rel_tol=1e-8):
-            eq_propagator = Propagator[type(hamiltonian)](params.eq_timestep, params.ene_bound_const, params.fb_bound)
+            eq_propagator = Propagator[type(hamiltonian)](
+                params.eq_timestep, params.ene_bound_const, params.fb_bound
+            )
             eq_propagator.build(hamiltonian, trial_wavefunction, walkers, mpi_handler)
         else:
             eq_propagator = propagator
@@ -560,12 +604,23 @@ class AFQMC(AFQMCBase):
         eshift = 0.0
         self.walkers.orthogonalise()
 
+        self.pcontrol_eq = PopController(
+            self.params.num_walkers,
+            self.params.num_steps_per_block,
+            self.mpi_handler,
+            pop_control_method=self.params.pop_control_method,
+            verbose=self.verbose,
+        )
+
         self.pcontrol = PopController(
             self.params.num_walkers,
             self.params.num_steps_per_block,
             self.mpi_handler,
-            pop_control_method="stochastic_reconfiguration",
+            pop_control_method=self.params.pop_control_method,
             verbose=self.verbose,
+            correlated_samp=self.params.correlated_samp,
+            reference_run=self.params.reference_run,
+            walkermap_filepath=self.params.walkermap_filepath,
         )
 
         self.get_env_info()
@@ -602,7 +657,9 @@ class AFQMC(AFQMCBase):
                     self.tortho += time.time() - start
             start = time.time()
             if step <= num_eqlb_steps:
-                self.eq_propagator.propagate_walkers(self.walkers, self.hamiltonian, self.trial, eshift)
+                self.eq_propagator.propagate_walkers(
+                    self.walkers, self.hamiltonian, self.trial, eshift
+                )
                 self.tprop_fbias = self.eq_propagator.timer.tfbias
                 self.tprop_ovlp = self.eq_propagator.timer.tovlp
                 self.tprop_update = self.eq_propagator.timer.tupdate
@@ -612,8 +669,10 @@ class AFQMC(AFQMCBase):
             else:
                 if discard_weights_aftereq:
                     if step == num_eqlb_steps + 1:
-                        self.walkers.weight.fill(1.)
-                self.propagator.propagate_walkers(self.walkers, self.hamiltonian, self.trial, eshift)
+                        self.walkers.weight.fill(1.0)
+                self.propagator.propagate_walkers(
+                    self.walkers, self.hamiltonian, self.trial, eshift
+                )
                 self.tprop_fbias = self.propagator.timer.tfbias
                 self.tprop_ovlp = self.propagator.timer.tovlp
                 self.tprop_update = self.propagator.timer.tupdate
@@ -622,7 +681,13 @@ class AFQMC(AFQMCBase):
                 self.tprop_gemm = self.propagator.timer.tgemm
 
             start_clip = time.time()
-            if step > 1:
+            if step > 1 and step <= num_eqlb_steps:
+                wbound = self.pcontrol_eq.total_weight * 0.10
+                xp.nan_to_num(self.walkers.weight, copy=False)
+                xp.clip(
+                    self.walkers.weight, a_min=-wbound, a_max=wbound, out=self.walkers.weight
+                )  # in-place clipping
+            elif step > num_eqlb_steps and step > 1:
                 wbound = self.pcontrol.total_weight * 0.10
                 xp.nan_to_num(self.walkers.weight, copy=False)
                 xp.clip(
@@ -641,13 +706,13 @@ class AFQMC(AFQMCBase):
             if step <= num_eqlb_steps:
                 if step % self.params.eq_pop_control_freq == 0:
                     start = time.time()
-                    self.pcontrol.pop_control(self.walkers, comm)
+                    self.pcontrol_eq.pop_control(self.walkers, comm)
                     synchronize()
                     self.tpopc += time.time() - start
-                    self.tpopc_send = self.pcontrol.timer.send_time
-                    self.tpopc_recv = self.pcontrol.timer.recv_time
-                    self.tpopc_comm = self.pcontrol.timer.communication_time
-                    self.tpopc_non_comm = self.pcontrol.timer.non_communication_time
+                    self.tpopc_send = self.pcontrol_eq.timer.send_time
+                    self.tpopc_recv = self.pcontrol_eq.timer.recv_time
+                    self.tpopc_comm = self.pcontrol_eq.timer.communication_time
+                    self.tpopc_non_comm = self.pcontrol_eq.timer.non_communication_time
             else:
                 if step % self.params.pop_control_freq == 0:
                     start = time.time()
@@ -672,7 +737,9 @@ class AFQMC(AFQMCBase):
                         self.system, self.hamiltonian, self.trial, self.walkers
                     )
                     self.estimators.print_block(
-                        comm, (step - num_eqlb_steps)// self.params.num_steps_per_block , self.accumulators
+                        comm,
+                        (step - num_eqlb_steps) // self.params.num_steps_per_block,
+                        self.accumulators,
                     )
                     self.accumulators.zero()
             else:

@@ -43,7 +43,11 @@ def write_hamiltonian(
         fh5["e0"] = e0
 
 
-def read_hamiltonian(filename: str) -> Tuple[numpy.ndarray, numpy.ndarray, float]:
+def read_hamiltonian(
+    filename: str, return_transposed: bool = False
+) -> Union[
+    Tuple[numpy.ndarray, numpy.ndarray, float], Tuple[numpy.ndarray, numpy.ndarray, float, bool]
+]:
     with h5py.File(filename, "r") as fh5:
         hcore = numpy.array(fh5["hcore"])
         try:
@@ -67,9 +71,14 @@ def read_hamiltonian(filename: str) -> Tuple[numpy.ndarray, numpy.ndarray, float
             transposed = True
         else:
             raise AssertionError(message)
-    return hcore, LXmn, e0, transposed
+    if return_transposed:
+        return hcore, LXmn, e0, transposed
+    return hcore, LXmn, e0
 
-def read_kpt_hamiltonian(filename: str) -> Tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray, float]:
+
+def read_kpt_hamiltonian(
+    filename: str,
+) -> Tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray, float]:
     with h5py.File(filename, "r") as fh5:
         print(fh5.keys())
         print(fh5["hcore"])
@@ -78,8 +87,6 @@ def read_kpt_hamiltonian(filename: str) -> Tuple[numpy.ndarray, numpy.ndarray, n
         kpts = numpy.array(fh5["kpoints"][()])
         e0 = float(fh5["e0"][()])
     assert len(hcore.shape) == 3, "Incorrect shape for hcore, expected 3-dimensional array"
-    nmo = hcore.shape[-1]
-    naux = LXmn.shape[0] # gamma, k, mu, q, nu
     assert len(LXmn.shape) == 5, "Incorrect shape for LXmn, expected 5-dimensional array"
     assert len(kpts.shape) == 2, "Incorrect shape for kpts, expected 2-dimensional array"
     return hcore, LXmn, kpts, e0
@@ -693,7 +700,7 @@ def write_qmcpack_sparse(
         # Number of integral blocks used for chunked HDF5 storage.
         # Currently hardcoded for simplicity.
         nint_block = 1
-        (nalpha, nbeta) = nelec
+        nalpha, nbeta = nelec
         unused = 0
         fh5["Hamiltonian/dims"] = numpy.array(
             [unused, nnz, nint_block, nmo, nalpha, nbeta, unused, nchol_vecs]
